@@ -1,0 +1,16 @@
+{
+    "FileVersion": 3,
+    "Version": 1,
+    "VersionName": "1.2",
+    "FriendlyName": "HL2 BSP Importer (Full)",
+    "Description": "Import Half-Life 2 maps with displacements, materials, instances, correct scale",
+    "Category": "Importer",
+    "CreatedBy": "Your Name",
+    "Modules": [
+        {
+            "Name": "HL2BSPImporter",
+            "Type": "Editor",
+            "LoadingPhase": "Default"
+        }
+    ]
+}
