@@ -1,4 +1,5 @@
 #include "HL2EntityTable.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 UHL2EntityTable* UHL2EntityTable::CreateFromEntities(UObject* Outer, const TArray<FHL2Entity>& Entities)
 {
     auto* Table = NewObject<UHL2EntityTable>(Outer, NAME_None, RF_Public | RF_Standalone);

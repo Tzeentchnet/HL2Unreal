@@ -6,9 +6,15 @@ public class HL2BSPImporter : ModuleRules
     {
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
         PublicDependencyModuleNames.AddRange(
-            new string[] { "Core", "CoreUObject", "Engine", "UnrealEd",
-                           "AssetTools", "Projects", "RenderCore", "RHI",
-                           "RawMesh", "StaticMeshDescription", "MeshDescription",
-                           "AssetRegistry", "Json", "JsonUtilities" });
+            new string[] {
+                "Core", "CoreUObject", "Engine",
+                // Public because UFactory is referenced in a public header
+                "UnrealEd",
+                "AssetRegistry",
+                "Json", "JsonUtilities",
+                "StaticMeshDescription", "MeshDescription",
+                "RenderCore", "RHI",
+                "AssetTools", "Projects"
+            });
     }
 }

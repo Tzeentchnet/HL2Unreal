@@ -1,76 +1,333 @@
 #include "HL2BSPImporterFactory.h"
 #include "BspFile.h"
 #include "HL2EntityTable.h"
-#include "HL2BSPImporterSettings.h"
+#include "BL2BSPImporterSettings.h"
 #include "Engine/StaticMesh.h"
-#include "RawMesh.h"
+#include "MeshDescription.h"
 #include "StaticMeshAttributes.h"
+#include "StaticMeshOperations.h"
+#include "UObject/Package.h"
+#include "Materials/Material.h"
+#include "PhysicsEngine/BodySetup.h"
+#include "UObject/SoftObjectPath.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "Interfaces/IPluginManager.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonSerializer.h"
+#include "Misc/PackageName.h"
 
 static TMap<FString, UMaterialInterface*> GMaterialMap;
 
-static FRawMesh BuildRawMeshFromBSP(const FBspFile& Bsp)
+static TMap<FString, UMaterialInterface*> LoadMaterialMap()
 {
-    FRawMesh RM;
+    TMap<FString, UMaterialInterface*> Map;
+
+    const UHL2BSPImporterSettings* Sets = GetDefault<UHL2BSPImporterSettings>();
+    TArray<FString> Candidates;
+
+    auto AddIfFile = [&](const FString& Path)
+    {
+        if (!Path.IsEmpty() && FPaths::FileExists(Path))
+        {
+            Candidates.Add(Path);
+        }
+    };
+
+    // Resolve settings path
+    if (!Sets->MaterialJsonPath.IsEmpty())
+    {
+        FString P = Sets->MaterialJsonPath;
+        if (P.StartsWith(TEXT("/Game/")))
+        {
+            FString Rel = P.RightChop(6); // strip /Game/
+            if (!Rel.EndsWith(TEXT(".json")))
+            {
+                Rel += TEXT(".json");
+            }
+            FString Abs = FPaths::ConvertRelativePathToFull(FPaths::ProjectContentDir() / Rel);
+            AddIfFile(Abs);
+        }
+        else
+        {
+            AddIfFile(P);
+        }
+    }
+
+    // Fallback to plugin Resources/Materials.json
+    if (Candidates.Num() == 0)
+    {
+        if (const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("HL2BSPImporter")))
+        {
+            FString Fallback = Plugin->GetBaseDir() / TEXT("Resources/Materials.json");
+            AddIfFile(Fallback);
+        }
+    }
+
+    FString Chosen;
+    if (Candidates.Num() > 0)
+    {
+        Chosen = Candidates[0];
+    }
+    else
+    {
+        return Map; // nothing to load
+    }
+
+    FString JsonStr;
+    if (!FFileHelper::LoadFileToString(JsonStr, *Chosen))
+    {
+        return Map;
+    }
+
+    TSharedPtr<FJsonValue> RootValue;
+    const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonStr);
+    if (!FJsonSerializer::Deserialize(Reader, RootValue) || !RootValue.IsValid() || RootValue->Type != EJson::Array)
+    {
+        return Map;
+    }
+
+    const TArray<TSharedPtr<FJsonValue>>& Arr = RootValue->AsArray();
+    for (const TSharedPtr<FJsonValue>& V : Arr)
+    {
+        if (!V.IsValid() || V->Type != EJson::Object) continue;
+        const TSharedPtr<FJsonObject> Obj = V->AsObject();
+        FString TextureName;
+        FString MaterialPath;
+        if (!Obj->TryGetStringField(TEXT("TextureName"), TextureName)) continue;
+        if (!Obj->TryGetStringField(TEXT("MaterialPath"), MaterialPath)) continue;
+
+        FSoftObjectPath Path(MaterialPath);
+        if (UObject* Loaded = Path.TryLoad())
+        {
+            if (auto* MI = Cast<UMaterialInterface>(Loaded))
+            {
+                Map.Add(TextureName, MI);
+            }
+        }
+    }
+
+    return Map;
+}
+
+static FVector TransformPos(const FVector& In, const UHL2BSPImporterSettings* Sets)
+{
+    FVector P = In;
+    if (Sets && Sets->bFlipYZ)
+    {
+        P = FVector(In.X, In.Z, In.Y);
+    }
+    // Match legacy behavior: flip Y sign for Source->UE forward axis
+    P.Y *= -1.f;
+    const float Scale = Sets ? Sets->WorldScale : 1.f;
+    P *= Scale;
+    return P;
+}
+
+static FVector TransformDir(const FVector& In, const UHL2BSPImporterSettings* Sets)
+{
+    // Same as position for linear transforms (swap/flip/scale)
+    return TransformPos(In, Sets);
+}
+
+static FMeshDescription BuildMeshDescriptionFromBSP(const FBspFile& Bsp, const UHL2BSPImporterSettings* Sets, TArray<FName>& OutMaterialSlotNames)
+{
+    FMeshDescription MD;
+    FStaticMeshAttributes Attrs(MD);
+    Attrs.Register();
+
+    auto& VertexPositions = MD.GetVertexPositions();
+    TVertexInstanceAttributesRef<FVector3f> InstanceNormals = Attrs.GetVertexInstanceNormals();
+    TVertexInstanceAttributesRef<FVector3f> InstanceTangents = Attrs.GetVertexInstanceTangents();
+    TVertexInstanceAttributesRef<float> InstanceBinormalSigns = Attrs.GetVertexInstanceBinormalSigns();
+    TVertexInstanceAttributesRef<FVector4f> InstanceColors = Attrs.GetVertexInstanceColors();
+    TVertexInstanceAttributesRef<FVector2f> InstanceUVs = Attrs.GetVertexInstanceUVs();
+    InstanceUVs.SetNumChannels(1);
+
+    TVertexInstanceAttributesRef<FName> PolyGroupMaterialNames = Attrs.GetPolygonGroupMaterialSlotNames();
+
+    // Map texture name -> polygon group
+    TMap<FName, FPolygonGroupID> PolyGroups;
+    auto GetOrCreatePG = [&](const FString& TextureName) -> FPolygonGroupID
+    {
+        const FName SlotName = TextureName.IsEmpty() ? FName(TEXT("Default")) : FName(*TextureName);
+        if (FPolygonGroupID* Found = PolyGroups.Find(SlotName))
+        {
+            return *Found;
+        }
+        FPolygonGroupID NewId = MD.CreatePolygonGroup();
+        PolyGroups.Add(SlotName, NewId);
+        PolyGroupMaterialNames[NewId] = SlotName;
+        OutMaterialSlotNames.AddUnique(SlotName);
+        return NewId;
+    };
+
     const auto& Verts = Bsp.GetVertices();
     const auto& Faces = Bsp.GetFaces();
 
-    /* brushes */
+    // Helper to add a single triangle by positions/UVs (no vertex reuse for simplicity)
+    auto AddTri = [&](const FVector& P0, const FVector2D& UV0,
+                      const FVector& P1, const FVector2D& UV1,
+                      const FVector& P2, const FVector2D& UV2)
+    {
+        // Create vertices
+        const FVertexID V0 = MD.CreateVertex(); VertexPositions[V0] = (FVector3f)P0;
+        const FVertexID V1 = MD.CreateVertex(); VertexPositions[V1] = (FVector3f)P1;
+        const FVertexID V2 = MD.CreateVertex(); VertexPositions[V2] = (FVector3f)P2;
+
+        // Create vertex instances
+        const FVertexInstanceID I0 = MD.CreateVertexInstance(V0);
+        const FVertexInstanceID I1 = MD.CreateVertexInstance(V1);
+        const FVertexInstanceID I2 = MD.CreateVertexInstance(V2);
+
+        InstanceUVs.Set(I0, 0, (FVector2f)UV0);
+        InstanceUVs.Set(I1, 0, (FVector2f)UV1);
+        InstanceUVs.Set(I2, 0, (FVector2f)UV2);
+
+        // Simple up normals/tangents placeholder; build step will recompute
+        const FVector3f Up = (FVector3f)FVector::UpVector;
+        InstanceNormals[I0] = Up; InstanceNormals[I1] = Up; InstanceNormals[I2] = Up;
+        InstanceTangents[I0] = FVector3f::ZeroVector; InstanceTangents[I1] = FVector3f::ZeroVector; InstanceTangents[I2] = FVector3f::ZeroVector;
+        InstanceBinormalSigns[I0] = 1.0f; InstanceBinormalSigns[I1] = 1.0f; InstanceBinormalSigns[I2] = 1.0f;
+        InstanceColors[I0] = FVector4f(1,1,1,1); InstanceColors[I1] = FVector4f(1,1,1,1); InstanceColors[I2] = FVector4f(1,1,1,1);
+
+        TArray<FVertexInstanceID, TFixedAllocator<3>> InstIDs{ I0, I1, I2 };
+        MD.CreateTriangle(PGID, InstIDs);
+    };
+
+    // Brushes: fan-triangulate faces; assign polygon groups by texture name
     for (const auto& F : Faces)
     {
-        uint32 NumTris = F.NumVertices - 2;
-        for (uint32 t = 0; t < NumTris; ++t)
+        if (F.NumVertices < 3) continue;
+        const FPolygonGroupID PGID = GetOrCreatePG(F.TextureName);
+        for (uint32 t = 0; t < F.NumVertices - 2; ++t)
         {
-            uint32 I0 = F.FirstVertex;
-            uint32 I1 = F.FirstVertex + t + 1;
-            uint32 I2 = F.FirstVertex + t + 2;
-            RM.VertexPositions.Append({ Verts[I0].Position, Verts[I1].Position, Verts[I2].Position });
-            RM.WedgeIndices.Append({ RM.WedgeIndices.Num(), RM.WedgeIndices.Num(), RM.WedgeIndices.Num() });
-            RM.WedgeTexCoords[0].Append({ Verts[I0].UV, Verts[I1].UV, Verts[I2].UV });
-            RM.WedgeTangentZ.Append({ FVector::UpVector, FVector::UpVector, FVector::UpVector });
-            RM.FaceMaterialIndices.Add(0);
-            RM.FaceSmoothingMasks.Add(0xFFFFFFFF);
+            const uint32 I0 = F.FirstVertex;
+            const uint32 I1 = F.FirstVertex + t + 1;
+            const uint32 I2 = F.FirstVertex + t + 2;
+            // Rebind AddTri to use this PGID
+            // Create vertices with transform
+            const FVertexID V0 = MD.CreateVertex(); VertexPositions[V0] = (FVector3f)TransformPos(Verts[I0].Position, Sets);
+            const FVertexID V1 = MD.CreateVertex(); VertexPositions[V1] = (FVector3f)TransformPos(Verts[I1].Position, Sets);
+            const FVertexID V2 = MD.CreateVertex(); VertexPositions[V2] = (FVector3f)TransformPos(Verts[I2].Position, Sets);
+
+            const FVertexInstanceID J0 = MD.CreateVertexInstance(V0);
+            const FVertexInstanceID J1 = MD.CreateVertexInstance(V1);
+            const FVertexInstanceID J2 = MD.CreateVertexInstance(V2);
+
+            InstanceUVs.Set(J0, 0, (FVector2f)Verts[I0].UV);
+            InstanceUVs.Set(J1, 0, (FVector2f)Verts[I1].UV);
+            InstanceUVs.Set(J2, 0, (FVector2f)Verts[I2].UV);
+
+            const FVector3f Up = (FVector3f)FVector::UpVector;
+            InstanceNormals[J0] = Up; InstanceNormals[J1] = Up; InstanceNormals[J2] = Up;
+            InstanceTangents[J0] = FVector3f::ZeroVector; InstanceTangents[J1] = FVector3f::ZeroVector; InstanceTangents[J2] = FVector3f::ZeroVector;
+            InstanceBinormalSigns[J0] = 1.0f; InstanceBinormalSigns[J1] = 1.0f; InstanceBinormalSigns[J2] = 1.0f;
+            InstanceColors[J0] = FVector4f(1,1,1,1); InstanceColors[J1] = FVector4f(1,1,1,1); InstanceColors[J2] = FVector4f(1,1,1,1);
+
+            TArray<FVertexInstanceID, TFixedAllocator<3>> InstIDs{ J0, J1, J2 };
+            MD.CreateTriangle(PGID, InstIDs);
         }
     }
 
-    /* displacements */
+    // Displacements: build via bilinear from base quad; use dispvert vectors as offsets
     const auto& Disps = Bsp.GetDispInfos();
+    const auto& DV = Bsp.GetDispVerts();
     for (const auto& DI : Disps)
     {
-        int32 Side = (1 << DI.Power) + 1;
-        int32 Total = Side * Side;
-        const auto& DV = Bsp.GetDispVerts();
-        TArray<FVector> DispPos;
-        DispPos.SetNum(Total);
-        for (int32 i = 0; i < Total; ++i)
+        if (DI.MapFace < 0 || DI.MapFace >= Faces.Num()) continue;
+        const auto& BaseFace = Faces[DI.MapFace];
+        if (BaseFace.NumVertices < 4) continue; // only handle quads for now
+
+        const int32 Side = (1 << DI.Power) + 1;
+        const int32 Total = Side * Side;
+        if (DI.VertStart < 0 || DI.VertStart + Total > DV.Num()) continue;
+
+        // Base quad corners in 0..1 grid order (00,10,11,01)
+        const uint32 I0 = BaseFace.FirstVertex + 0;
+        const uint32 I1 = BaseFace.FirstVertex + 1;
+        const uint32 I2 = BaseFace.FirstVertex + 2;
+        const uint32 I3 = BaseFace.FirstVertex + 3;
+        if (I3 >= (uint32)Verts.Num()) continue;
+
+        const FVector C0 = TransformPos(Verts[I0].Position, Sets);
+        const FVector C1 = TransformPos(Verts[I1].Position, Sets);
+        const FVector C2 = TransformPos(Verts[I2].Position, Sets);
+        const FVector C3 = TransformPos(Verts[I3].Position, Sets);
+
+        auto Bilinear = [&](float u, float v) -> FVector
         {
-            FVector P(DV[DI.VertStart + i].Vector[0], -DV[DI.VertStart + i].Vector[1], DV[DI.VertStart + i].Vector[2]);
-            P *= 2.54f;
-            DispPos[i] = P;
-        }
-        int32 Base = RM.VertexPositions.Num();
+            const FVector A = FMath::Lerp(C0, C1, u);
+            const FVector B = FMath::Lerp(C3, C2, u);
+            return FMath::Lerp(A, B, v);
+        };
+
+        // Build grid vertices and store bilinear UVs from base face
+        TArray<FVertexID> Grid; Grid.SetNum(Total);
+        const FVector2D T0 = Verts[I0].UV;
+        const FVector2D T1 = Verts[I1].UV;
+        const FVector2D T2 = Verts[I2].UV;
+        const FVector2D T3 = Verts[I3].UV;
+        auto BilinearUV = [&](float u, float v) -> FVector2D
+        {
+            const FVector2D A = FMath::Lerp(T0, T1, u);
+            const FVector2D B = FMath::Lerp(T3, T2, u);
+            return FMath::Lerp(A, B, v);
+        };
+        TArray<FVector2f> GridUV; GridUV.SetNum(Total);
         for (int32 y = 0; y < Side; ++y)
+        {
             for (int32 x = 0; x < Side; ++x)
             {
-                RM.VertexPositions.Add(DispPos[y * Side + x]);
-                RM.WedgeTexCoords[0].Add(FVector2D(x / float(Side - 1), y / float(Side - 1)));
-                RM.WedgeTangentZ.Add(FVector::UpVector);
+                const float u = (float)x / (Side - 1);
+                const float v = (float)y / (Side - 1);
+                const FVector Base = Bilinear(u, v);
+                const auto& SrcDV = DV[DI.VertStart + y * Side + x];
+                const FVector Offset(SrcDV.Vector[0], SrcDV.Vector[1], SrcDV.Vector[2]);
+                const FVector P = Base + TransformDir(Offset, Sets);
+
+                const FVertexID VId = MD.CreateVertex(); VertexPositions[VId] = (FVector3f)P;
+                Grid[y * Side + x] = VId;
+                GridUV[y * Side + x] = (FVector2f)BilinearUV(u, v);
             }
+        }
+
+        const FPolygonGroupID PGID = GetOrCreatePG(BaseFace.TextureName);
         for (int32 y = 0; y < Side - 1; ++y)
+        {
             for (int32 x = 0; x < Side - 1; ++x)
             {
-                int A = Base + y * Side + x;
-                int B = A + 1;
-                int C = Base + (y + 1) * Side + x + 1;
-                int D = Base + (y + 1) * Side + x;
-                RM.WedgeIndices.Append({ A, B, C, A, C, D });
-                RM.FaceMaterialIndices.Append({ 0, 0 });
-                RM.FaceSmoothingMasks.Append({ 0xFFFFFFFF, 0xFFFFFFFF });
+                const int A = y * Side + x;
+                const int B = A + 1;
+                const int C = (y + 1) * Side + x + 1;
+                const int D = (y + 1) * Side + x;
+
+                const FVertexInstanceID IA = MD.CreateVertexInstance(Grid[A]);
+                const FVertexInstanceID IB = MD.CreateVertexInstance(Grid[B]);
+                const FVertexInstanceID IC = MD.CreateVertexInstance(Grid[C]);
+                const FVertexInstanceID ID = MD.CreateVertexInstance(Grid[D]);
+
+                // Assign UVs and default attributes for the new instances
+                InstanceUVs.Set(IA, 0, GridUV[A]);
+                InstanceUVs.Set(IB, 0, GridUV[B]);
+                InstanceUVs.Set(IC, 0, GridUV[C]);
+                InstanceUVs.Set(ID, 0, GridUV[D]);
+                const FVector3f Up = (FVector3f)FVector::UpVector;
+                InstanceNormals[IA] = Up; InstanceNormals[IB] = Up; InstanceNormals[IC] = Up; InstanceNormals[ID] = Up;
+                InstanceTangents[IA] = FVector3f::ZeroVector; InstanceTangents[IB] = FVector3f::ZeroVector; InstanceTangents[IC] = FVector3f::ZeroVector; InstanceTangents[ID] = FVector3f::ZeroVector;
+                InstanceBinormalSigns[IA] = 1.0f; InstanceBinormalSigns[IB] = 1.0f; InstanceBinormalSigns[IC] = 1.0f; InstanceBinormalSigns[ID] = 1.0f;
+                InstanceColors[IA] = FVector4f(1,1,1,1); InstanceColors[IB] = FVector4f(1,1,1,1); InstanceColors[IC] = FVector4f(1,1,1,1); InstanceColors[ID] = FVector4f(1,1,1,1);
+
+                TArray<FVertexInstanceID, TFixedAllocator<3>> Tri1{ IA, IB, IC };
+                TArray<FVertexInstanceID, TFixedAllocator<3>> Tri2{ IA, IC, ID };
+                MD.CreateTriangle(PGID, Tri1);
+                MD.CreateTriangle(PGID, Tri2);
             }
+        }
     }
-    return RM;
+
+    return MD;
 }
 
 UHL2BSPImporterFactory::UHL2BSPImporterFactory()
@@ -95,23 +352,60 @@ UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass*, UObject* InParent, F
     GMaterialMap = LoadMaterialMap();
 
     const UHL2BSPImporterSettings* Sets = GetDefault<UHL2BSPImporterSettings>();
-    FRawMesh RM = BuildRawMeshFromBSP(Bsp);
+    TArray<FName> SlotNames;
+    FMeshDescription MD = BuildMeshDescriptionFromBSP(Bsp, Sets, SlotNames);
 
     FString PkgName = FPackageName::GetLongPackagePath(InParent->GetName()) / InName.ToString();
     UPackage* Pkg = CreatePackage(*PkgName);
     UStaticMesh* Mesh = NewObject<UStaticMesh>(Pkg, InName, RF_Public | RF_Standalone);
 
-    Mesh->AddSourceModel();
-    FStaticMeshSourceModel& Src = Mesh->GetSourceModel(0);
-    Src.BuildSettings.bRecomputeNormals = true;
-    Src.BuildSettings.bRecomputeTangents = true;
-    Src.BuildSettings.bGenerateLightmapUVs = true;
-    Src.SaveRawMesh(RM);
+    // Create material slots matching polygon groups; use map when available
+    Mesh->GetStaticMaterials().Reset();
+    for (const FName& Slot : SlotNames)
+    {
+        UMaterialInterface* Mat = nullptr;
+        if (UMaterialInterface** Found = GMaterialMap.Find(Slot.ToString()))
+        {
+            Mat = *Found;
+        }
+        if (!Mat) Mat = UMaterial::GetDefaultMaterial(MD_Surface);
+        Mesh->GetStaticMaterials().Add(FStaticMaterial(Mat, Slot));
+    }
 
-    Mesh->StaticMaterials.Add(FStaticMaterial(UMaterial::GetDefaultMaterial(MD_Surface)));
-    if (Sets->bBuildNanite) Mesh->NaniteSettings.bEnabled = true;
-    Mesh->Build();
+    // Compute normals/tangents from geometry
+    FStaticMeshOperations::ComputeTangentsAndNormals(MD, 0.0f);
+
+    // Configure Nanite before build
+    Mesh->NaniteSettings.bEnabled = Sets->bBuildNanite;
+
+    // Build from MeshDescription (UE5 path)
+    TArray<const FMeshDescription*> Descs; Descs.Add(&MD);
+    Mesh->BuildFromMeshDescriptions(Descs);
+
+    // Collision settings
+    if (Sets->bImportCollision)
+    {
+        Mesh->CreateBodySetup();
+        if (Mesh->GetBodySetup())
+        {
+            Mesh->GetBodySetup()->CollisionTraceFlag = CTF_UseComplexAsSimple;
+        }
+    }
 
     FAssetRegistryModule::AssetCreated(Mesh);
+
+    // Create Entities DataTable asset from BSP entities if available
+    const TArray<FHL2Entity>& Entities = Bsp.GetEntities();
+    if (Entities.Num() > 0)
+    {
+        FString EntityPkgName = PkgName + TEXT("_Entities");
+        UPackage* EntPkg = CreatePackage(*EntityPkgName);
+        UHL2EntityTable* Table = UHL2EntityTable::CreateFromEntities(EntPkg, Entities);
+        if (Table)
+        {
+            FAssetRegistryModule::AssetCreated(Table);
+        }
+    }
+
     return Mesh;
 }
