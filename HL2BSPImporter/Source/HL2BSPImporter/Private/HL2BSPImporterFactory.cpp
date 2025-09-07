@@ -1,7 +1,7 @@
 #include "HL2BSPImporterFactory.h"
 #include "BspFile.h"
 #include "HL2EntityTable.h"
-#include "BL2BSPImporterSettings.h"
+#include "HL2BSPImporterSettings.h"
 #include "Engine/StaticMesh.h"
 #include "MeshDescription.h"
 #include "StaticMeshAttributes.h"
