@@ -1,7 +1,7 @@
 #pragma once
+#include "HL2BSPImporterSettings.generated.h"
 #include "CoreMinimal.h"
 #include "Engine/DeveloperSettings.h"
-#include "HL2BSPImporterSettings.generated.h"
 
 UCLASS(config = HL2BSPImporter, defaultconfig, meta = (DisplayName = "HL2 BSP Importer"))
 class UHL2BSPImporterSettings : public UDeveloperSettings
