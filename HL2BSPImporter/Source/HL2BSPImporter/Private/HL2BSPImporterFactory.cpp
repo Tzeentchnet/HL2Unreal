@@ -137,7 +137,7 @@ static FMeshDescription BuildMeshDescriptionFromBSP(const FBspFile& Bsp, const U
     FStaticMeshAttributes Attrs(MD);
     Attrs.Register();
 
-    auto& VertexPositions = MD.GetVertexPositions();
+    TVertexAttributesRef<FVector3f> VertexPositions = MD.GetVertexPositions();
     TVertexInstanceAttributesRef<FVector3f> InstanceNormals = Attrs.GetVertexInstanceNormals();
     TVertexInstanceAttributesRef<FVector3f> InstanceTangents = Attrs.GetVertexInstanceTangents();
     TVertexInstanceAttributesRef<float> InstanceBinormalSigns = Attrs.GetVertexInstanceBinormalSigns();
@@ -145,7 +145,7 @@ static FMeshDescription BuildMeshDescriptionFromBSP(const FBspFile& Bsp, const U
     TVertexInstanceAttributesRef<FVector2f> InstanceUVs = Attrs.GetVertexInstanceUVs();
     InstanceUVs.SetNumChannels(1);
 
-    TVertexInstanceAttributesRef<FName> PolyGroupMaterialNames = Attrs.GetPolygonGroupMaterialSlotNames();
+    TPolygonGroupAttributesRef<FName> PolyGroupMaterialNames = Attrs.GetPolygonGroupMaterialSlotNames();
 
     // Map texture name -> polygon group
     TMap<FName, FPolygonGroupID> PolyGroups;
@@ -166,35 +166,7 @@ static FMeshDescription BuildMeshDescriptionFromBSP(const FBspFile& Bsp, const U
     const auto& Verts = Bsp.GetVertices();
     const auto& Faces = Bsp.GetFaces();
 
-    // Helper to add a single triangle by positions/UVs (no vertex reuse for simplicity)
-    auto AddTri = [&](const FVector& P0, const FVector2D& UV0,
-                      const FVector& P1, const FVector2D& UV1,
-                      const FVector& P2, const FVector2D& UV2)
-    {
-        // Create vertices
-        const FVertexID V0 = MD.CreateVertex(); VertexPositions[V0] = (FVector3f)P0;
-        const FVertexID V1 = MD.CreateVertex(); VertexPositions[V1] = (FVector3f)P1;
-        const FVertexID V2 = MD.CreateVertex(); VertexPositions[V2] = (FVector3f)P2;
-
-        // Create vertex instances
-        const FVertexInstanceID I0 = MD.CreateVertexInstance(V0);
-        const FVertexInstanceID I1 = MD.CreateVertexInstance(V1);
-        const FVertexInstanceID I2 = MD.CreateVertexInstance(V2);
-
-        InstanceUVs.Set(I0, 0, (FVector2f)UV0);
-        InstanceUVs.Set(I1, 0, (FVector2f)UV1);
-        InstanceUVs.Set(I2, 0, (FVector2f)UV2);
-
-        // Simple up normals/tangents placeholder; build step will recompute
-        const FVector3f Up = (FVector3f)FVector::UpVector;
-        InstanceNormals[I0] = Up; InstanceNormals[I1] = Up; InstanceNormals[I2] = Up;
-        InstanceTangents[I0] = FVector3f::ZeroVector; InstanceTangents[I1] = FVector3f::ZeroVector; InstanceTangents[I2] = FVector3f::ZeroVector;
-        InstanceBinormalSigns[I0] = 1.0f; InstanceBinormalSigns[I1] = 1.0f; InstanceBinormalSigns[I2] = 1.0f;
-        InstanceColors[I0] = FVector4f(1,1,1,1); InstanceColors[I1] = FVector4f(1,1,1,1); InstanceColors[I2] = FVector4f(1,1,1,1);
-
-        TArray<FVertexInstanceID, TFixedAllocator<3>> InstIDs{ I0, I1, I2 };
-        MD.CreateTriangle(PGID, InstIDs);
-    };
+    // NOTE: Tri creation helper removed; triangles are built inline per polygon group.
 
     // Brushes: fan-triangulate faces; assign polygon groups by texture name
     for (const auto& F : Faces)
@@ -342,9 +314,9 @@ bool UHL2BSPImporterFactory::FactoryCanImport(const FString& Filename)
     return Filename.EndsWith(TEXT(".bsp"));
 }
 
-UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass*, UObject* InParent, FName InName,
-                                                   const FString& Filename, const TCHAR*,
-                                                   FFeedbackContext* Warn, bool& bCancel)
+UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass* InClass, UObject* InParent, FName InName,
+                                                   EObjectFlags Flags, const FString& Filename, const TCHAR* Parms,
+                                                   FFeedbackContext* Warn, bool& bOutOperationCanceled)
 {
     FBspFile Bsp;
     if (!Bsp.LoadFromFile(Filename)) return nullptr;
@@ -372,8 +344,8 @@ UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass*, UObject* InParent, F
         Mesh->GetStaticMaterials().Add(FStaticMaterial(Mat, Slot));
     }
 
-    // Compute normals/tangents from geometry
-    FStaticMeshOperations::ComputeTangentsAndNormals(MD, 0.0f);
+    // Compute normals/tangents from geometry (UE5.6 flags-based API)
+    FStaticMeshOperations::ComputeTangentsAndNormals(MD, EComputeNTBsFlags::Normals | EComputeNTBsFlags::Tangents);
 
     // Configure Nanite before build
     Mesh->NaniteSettings.bEnabled = Sets->bBuildNanite;
