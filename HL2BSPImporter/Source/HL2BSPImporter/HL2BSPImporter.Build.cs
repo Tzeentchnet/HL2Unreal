@@ -14,7 +14,9 @@ public class HL2BSPImporter : ModuleRules
                 "Json", "JsonUtilities",
                 "StaticMeshDescription", "MeshDescription",
                 "RenderCore", "RHI",
-                "AssetTools", "Projects"
+                "AssetTools", "Projects",
+                // Needed for UDeveloperSettings (UHL2BSPImporterSettings)
+                "DeveloperSettings"
             });
     }
 }
