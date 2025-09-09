@@ -1,3 +1,6 @@
 [
-  { "TextureName": "concrete/concretefloor028a", "MaterialPath": "/Game/Materials/Concrete/M_ConcreteFloor_028a" }
+    {
+        "TextureName": "example_texture",
+        "MaterialPath": "/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"
+    }
 ]

@@ -48,7 +48,14 @@ static TMap<FString, UMaterialInterface*> LoadMaterialMap()
                 Rel += TEXT(".json");
             }
             FString Abs = FPaths::ConvertRelativePathToFull(FPaths::ProjectContentDir() / Rel);
-            AddIfFile(Abs);
+            if (FPaths::FileExists(Abs))
+            {
+                AddIfFile(Abs);
+            }
+            else
+            {
+                UE_LOG(LogHL2BSPImporter, Warning, TEXT("MaterialJsonPath points to '/Game/...', but file was not found: %s"), *Abs);
+            }
         }
         else
         {

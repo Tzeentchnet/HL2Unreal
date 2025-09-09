@@ -14,8 +14,9 @@ public:
     UPROPERTY(config, EditAnywhere, Category = "Axis")
     bool bFlipYZ = true;
 
+    // Leave empty to use plugin fallback at Plugins/HL2BSPImporter/Resources/Materials.json
     UPROPERTY(config, EditAnywhere, Category = "Materials")
-    FString MaterialJsonPath = TEXT("/Game/HL2Importer/materials.json");
+    FString MaterialJsonPath = TEXT("");
 
     UPROPERTY(config, EditAnywhere, Category = "Import")
     bool bBuildNanite = true;
