@@ -1,5 +1,5 @@
 // Minimal module implementation for the HL2BSPImporter editor module
-#include "CoreMinimal.h"
+#include "HL2BSPImporter.h" // Must be first
 #include "Modules/ModuleManager.h"
 
 class FHL2BSPImporterModule : public IModuleInterface

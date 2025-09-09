@@ -5,6 +5,7 @@ public class HL2BSPImporter : ModuleRules
     public HL2BSPImporter(ReadOnlyTargetRules Target) : base(Target)
     {
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
+        PrivatePCHHeaderFile = "Public/HL2BSPImporter.h";
         PublicDependencyModuleNames.AddRange(
             new string[] {
                 "Core", "CoreUObject", "Engine",
