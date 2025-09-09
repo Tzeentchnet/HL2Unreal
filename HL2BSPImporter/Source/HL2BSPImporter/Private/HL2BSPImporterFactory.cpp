@@ -1,4 +1,5 @@
 #include "HL2BSPImporterFactory.h"
+#include "HL2BSPImporter.h"
 #include "BspFile.h"
 #include "HL2EntityTable.h"
 #include "HL2BSPImporterSettings.h"
@@ -72,12 +73,14 @@ static TMap<FString, UMaterialInterface*> LoadMaterialMap()
     }
     else
     {
+        UE_LOG(LogHL2BSPImporter, Warning, TEXT("No candidate material JSON found. Using empty material map."));
         return Map; // nothing to load
     }
 
     FString JsonStr;
     if (!FFileHelper::LoadFileToString(JsonStr, *Chosen))
     {
+        UE_LOG(LogHL2BSPImporter, Warning, TEXT("Failed to read material JSON: %s"), *Chosen);
         return Map;
     }
 
@@ -85,6 +88,7 @@ static TMap<FString, UMaterialInterface*> LoadMaterialMap()
     const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonStr);
     if (!FJsonSerializer::Deserialize(Reader, RootValue) || !RootValue.IsValid() || RootValue->Type != EJson::Array)
     {
+        UE_LOG(LogHL2BSPImporter, Warning, TEXT("Material JSON is not an array: %s"), *Chosen);
         return Map;
     }
 
@@ -107,7 +111,7 @@ static TMap<FString, UMaterialInterface*> LoadMaterialMap()
             }
         }
     }
-
+    UE_LOG(LogHL2BSPImporter, Log, TEXT("Loaded %d material mappings from: %s"), Map.Num(), *Chosen);
     return Map;
 }
 
@@ -169,6 +173,7 @@ static FMeshDescription BuildMeshDescriptionFromBSP(const FBspFile& Bsp, const U
     // NOTE: Tri creation helper removed; triangles are built inline per polygon group.
 
     // Brushes: fan-triangulate faces; assign polygon groups by texture name
+    int32 FacesProcessed = 0;
     for (const auto& F : Faces)
     {
         if (F.NumVertices < 3) continue;
@@ -201,20 +206,23 @@ static FMeshDescription BuildMeshDescriptionFromBSP(const FBspFile& Bsp, const U
             TArray<FVertexInstanceID, TFixedAllocator<3>> InstIDs{ J0, J1, J2 };
             MD.CreateTriangle(PGID, InstIDs);
         }
+        ++FacesProcessed;
     }
 
     // Displacements: build via bilinear from base quad; use dispvert vectors as offsets
     const auto& Disps = Bsp.GetDispInfos();
     const auto& DV = Bsp.GetDispVerts();
+    int32 DispsProcessed = 0;
+    int32 DispsSkipped = 0;
     for (const auto& DI : Disps)
     {
-        if (DI.MapFace < 0 || DI.MapFace >= Faces.Num()) continue;
+        if (DI.MapFace < 0 || DI.MapFace >= Faces.Num()) { ++DispsSkipped; continue; }
         const auto& BaseFace = Faces[DI.MapFace];
-        if (BaseFace.NumVertices < 4) continue; // only handle quads for now
+        if (BaseFace.NumVertices < 4) { ++DispsSkipped; continue; } // only handle quads for now
 
         const int32 Side = (1 << DI.Power) + 1;
         const int32 Total = Side * Side;
-        if (DI.VertStart < 0 || DI.VertStart + Total > DV.Num()) continue;
+        if (DI.VertStart < 0 || DI.VertStart + Total > DV.Num()) { ++DispsSkipped; continue; }
 
         // Base quad corners in 0..1 grid order (00,10,11,01)
         const uint32 I0 = BaseFace.FirstVertex + 0;
@@ -297,8 +305,10 @@ static FMeshDescription BuildMeshDescriptionFromBSP(const FBspFile& Bsp, const U
                 MD.CreateTriangle(PGID, Tri2);
             }
         }
+        ++DispsProcessed;
     }
-
+    UE_LOG(LogHL2BSPImporter, Log, TEXT("BSP build: Faces=%d Disps=%d SkippedDisps=%d V=%d VI=%d T=%d PG=%d Slots=%d"),
+        FacesProcessed, DispsProcessed, DispsSkipped, MD.Vertices().Num(), MD.VertexInstances().Num(), MD.Triangles().Num(), MD.PolygonGroups().Num(), OutMaterialSlotNames.Num());
     return MD;
 }
 
@@ -318,8 +328,13 @@ UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass* InClass, UObject* InP
                                                    EObjectFlags Flags, const FString& Filename, const TCHAR* Parms,
                                                    FFeedbackContext* Warn, bool& bOutOperationCanceled)
 {
+    UE_LOG(LogHL2BSPImporter, Log, TEXT("FactoryCreateFile: '%s' InParent=%s InName=%s"), *Filename, *GetNameSafe(InParent), *InName.ToString());
     FBspFile Bsp;
-    if (!Bsp.LoadFromFile(Filename)) return nullptr;
+    if (!Bsp.LoadFromFile(Filename))
+    {
+        UE_LOG(LogHL2BSPImporter, Error, TEXT("Failed to load BSP from file: %s"), *Filename);
+        return nullptr;
+    }
 
     GMaterialMap = LoadMaterialMap();
 
@@ -327,9 +342,13 @@ UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass* InClass, UObject* InP
     TArray<FName> SlotNames;
     FMeshDescription MD = BuildMeshDescriptionFromBSP(Bsp, Sets, SlotNames);
 
-    FString PkgName = FPackageName::GetLongPackagePath(InParent->GetName()) / InName.ToString();
-    UPackage* Pkg = CreatePackage(*PkgName);
-    UStaticMesh* Mesh = NewObject<UStaticMesh>(Pkg, InName, RF_Public | RF_Standalone);
+    // Create the asset in the provided parent package with provided flags
+    UStaticMesh* Mesh = NewObject<UStaticMesh>(InParent, InClass ? InClass : UStaticMesh::StaticClass(), InName, Flags);
+    if (!Mesh)
+    {
+        bOutOperationCanceled = true;
+        return nullptr;
+    }
 
     // Create material slots matching polygon groups; use map when available
     Mesh->GetStaticMaterials().Reset();
@@ -341,12 +360,17 @@ UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass* InClass, UObject* InP
             Mat = *Found;
         }
         // Avoid needing the full EMaterialDomain definition here
-        if (!Mat) Mat = UMaterial::GetDefaultMaterial(static_cast<EMaterialDomain>(0));
+        if (!Mat)
+        {
+            UE_LOG(LogHL2BSPImporter, Warning, TEXT("No material mapped for slot '%s'; using default."), *Slot.ToString());
+            Mat = UMaterial::GetDefaultMaterial(static_cast<EMaterialDomain>(0));
+        }
         Mesh->GetStaticMaterials().Add(FStaticMaterial(Mat, Slot));
     }
 
     // Compute normals/tangents from geometry (UE5.6 flags-based API)
     FStaticMeshOperations::ComputeTangentsAndNormals(MD, EComputeNTBsFlags::Normals | EComputeNTBsFlags::Tangents);
+    UE_LOG(LogHL2BSPImporter, Log, TEXT("Computed normals/tangents."));
 
     // Configure Nanite before build
     Mesh->NaniteSettings.bEnabled = Sets->bBuildNanite;
@@ -354,6 +378,7 @@ UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass* InClass, UObject* InP
     // Build from MeshDescription (UE5 path)
     TArray<const FMeshDescription*> Descs; Descs.Add(&MD);
     Mesh->BuildFromMeshDescriptions(Descs);
+    UE_LOG(LogHL2BSPImporter, Log, TEXT("StaticMesh built from MeshDescription. LODs=%d Materials=%d"), Mesh->GetNumLODs(), Mesh->GetStaticMaterials().Num());
 
     // Collision settings
     if (Sets->bImportCollision)
@@ -362,23 +387,36 @@ UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass* InClass, UObject* InP
         if (Mesh->GetBodySetup())
         {
             Mesh->GetBodySetup()->CollisionTraceFlag = CTF_UseComplexAsSimple;
+            UE_LOG(LogHL2BSPImporter, Log, TEXT("Collision: Set to UseComplexAsSimple."));
         }
     }
 
     FAssetRegistryModule::AssetCreated(Mesh);
+    Mesh->MarkPackageDirty();
 
     // Create Entities DataTable asset from BSP entities if available
     const TArray<FHL2Entity>& Entities = Bsp.GetEntities();
     if (Entities.Num() > 0)
     {
-        FString EntityPkgName = PkgName + TEXT("_Entities");
+        FString EntityPkgName = InParent->GetName() + TEXT("_Entities");
         UPackage* EntPkg = CreatePackage(*EntityPkgName);
         UHL2EntityTable* Table = UHL2EntityTable::CreateFromEntities(EntPkg, Entities);
         if (Table)
         {
             FAssetRegistryModule::AssetCreated(Table);
+            Table->MarkPackageDirty();
+            UE_LOG(LogHL2BSPImporter, Log, TEXT("Created Entities DataTable: %s"), *Table->GetName());
+        }
+        else
+        {
+            UE_LOG(LogHL2BSPImporter, Warning, TEXT("Failed to create Entities DataTable for %d entities."), Entities.Num());
         }
     }
+    else
+    {
+        UE_LOG(LogHL2BSPImporter, Log, TEXT("No entities found in BSP."));
+    }
 
+    bOutOperationCanceled = false;
     return Mesh;
 }

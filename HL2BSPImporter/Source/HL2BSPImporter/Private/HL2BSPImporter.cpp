@@ -2,6 +2,8 @@
 #include "HL2BSPImporter.h" // Must be first
 #include "Modules/ModuleManager.h"
 
+DEFINE_LOG_CATEGORY(LogHL2BSPImporter);
+
 class FHL2BSPImporterModule : public IModuleInterface
 {
 public:
