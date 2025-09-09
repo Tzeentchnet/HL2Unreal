@@ -340,7 +340,8 @@ UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass* InClass, UObject* InP
         {
             Mat = *Found;
         }
-        if (!Mat) Mat = UMaterial::GetDefaultMaterial(MD_Surface);
+        // Avoid needing the full EMaterialDomain definition here
+        if (!Mat) Mat = UMaterial::GetDefaultMaterial(static_cast<EMaterialDomain>(0));
         Mesh->GetStaticMaterials().Add(FStaticMaterial(Mat, Slot));
     }
 
