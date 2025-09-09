@@ -18,6 +18,7 @@
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonSerializer.h"
 #include "Misc/PackageName.h"
+#include "HAL/FileManager.h"
 
 static TMap<FString, UMaterialInterface*> GMaterialMap;
 
@@ -324,11 +325,15 @@ UHL2BSPImporterFactory::UHL2BSPImporterFactory()
     bEditorImport = true;
     SupportedClass = UStaticMesh::StaticClass();
     Formats.Add(TEXT("bsp;HL2 Map"));
+    UE_LOG(LogHL2BSPImporter, Log, TEXT("UHL2BSPImporterFactory constructed. SupportedClass=UStaticMesh Formats=%s"), TEXT("bsp"));
 }
 
 bool UHL2BSPImporterFactory::FactoryCanImport(const FString& Filename)
 {
-    return Filename.EndsWith(TEXT(".bsp"));
+    const bool bCan = Filename.EndsWith(TEXT(".bsp"), ESearchCase::IgnoreCase);
+    UE_LOG(LogHL2BSPImporter, Log, TEXT("FactoryCanImport(%s) -> %s"), *Filename, bCan ? TEXT("true") : TEXT("false"));
+    UE_LOG(LogTemp, Log, TEXT("[HL2BSPImporter] FactoryCanImport(%s) -> %s"), *Filename, bCan ? TEXT("true") : TEXT("false"));
+    return bCan;
 }
 
 UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass* InClass, UObject* InParent, FName InName,
@@ -336,10 +341,70 @@ UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass* InClass, UObject* InP
                                                    FFeedbackContext* Warn, bool& bOutOperationCanceled)
 {
     UE_LOG(LogHL2BSPImporter, Log, TEXT("FactoryCreateFile: '%s' InParent=%s InName=%s"), *Filename, *GetNameSafe(InParent), *InName.ToString());
+    UE_LOG(LogTemp, Log, TEXT("[HL2BSPImporter] FactoryCreateFile: '%s' InParent=%s InName=%s"), *Filename, *GetNameSafe(InParent), *InName.ToString());
+    if (Warn)
+    {
+        Warn->Logf(ELogVerbosity::Display, TEXT("HL2BSPImporter: Importing %s"), *Filename);
+    }
+    // Basic file diagnostics before parsing
+    const bool bExists = FPaths::FileExists(Filename);
+    const int64 FileSize = IFileManager::Get().FileSize(*Filename);
+    UE_LOG(LogHL2BSPImporter, Log, TEXT("File check: Exists=%s Size=%lld"), bExists ? TEXT("true") : TEXT("false"), FileSize);
+    if (Warn)
+    {
+        Warn->Logf(ELogVerbosity::Display, TEXT("HL2BSPImporter: File exists=%s size=%lld"), bExists ? TEXT("true") : TEXT("false"), FileSize);
+    }
+    if (!bExists)
+    {
+        UE_LOG(LogHL2BSPImporter, Error, TEXT("Input file does not exist: %s"), *Filename);
+        if (Warn)
+        {
+            Warn->Logf(ELogVerbosity::Error, TEXT("HL2BSPImporter: File does not exist: %s"), *Filename);
+        }
+    }
+    if (Filename.EndsWith(TEXT(".bz2"), ESearchCase::IgnoreCase))
+    {
+        UE_LOG(LogHL2BSPImporter, Warning, TEXT("Input appears compressed (.bz2). Decompress before importing: %s"), *Filename);
+        if (Warn)
+        {
+            Warn->Logf(ELogVerbosity::Warning, TEXT("HL2BSPImporter: File looks compressed (.bz2). Decompress before importing."));
+        }
+    }
+
+    // Quick read probe to catch permissions/locking issues
+    TArray<uint8> Probe;
+    const bool bProbeOk = FFileHelper::LoadFileToArray(Probe, *Filename);
+    UE_LOG(LogHL2BSPImporter, Log, TEXT("Probe read: %s (bytes=%d)"), bProbeOk ? TEXT("OK") : TEXT("FAILED"), Probe.Num());
+    if (Warn)
+    {
+        Warn->Logf(bProbeOk ? ELogVerbosity::Display : ELogVerbosity::Warning, TEXT("HL2BSPImporter: Probe read %s (bytes=%d)"), bProbeOk ? TEXT("OK") : TEXT("FAILED"), Probe.Num());
+    }
+
     FBspFile Bsp;
     if (!Bsp.LoadFromFile(Filename))
     {
         UE_LOG(LogHL2BSPImporter, Error, TEXT("Failed to load BSP from file: %s"), *Filename);
+        UE_LOG(LogTemp, Error, TEXT("[HL2BSPImporter] Failed to load BSP: %s"), *Filename);
+        // Dump basic header info from the probe buffer to aid diagnosis
+        if (Probe.Num() >= 8)
+        {
+            const int32 Ident = *(const int32*)Probe.GetData();
+            const int32 Version = *(const int32*)(Probe.GetData() + 4);
+            ANSICHAR Magic[5]; Magic[0] = (Ident & 0xFF); Magic[1] = (Ident >> 8) & 0xFF; Magic[2] = (Ident >> 16) & 0xFF; Magic[3] = (Ident >> 24) & 0xFF; Magic[4] = 0;
+            UE_LOG(LogHL2BSPImporter, Error, TEXT("Probe header: Ident='%hs' (0x%08x) Version=%d"), Magic, Ident, Version);
+            if (Warn)
+            {
+                Warn->Logf(ELogVerbosity::Error, TEXT("HL2BSPImporter: Probe header Ident='%hs' (0x%08x) Version=%d"), Magic, Ident, Version);
+            }
+        }
+        else
+        {
+            UE_LOG(LogHL2BSPImporter, Error, TEXT("Probe buffer too small to read header (bytes=%d)"), Probe.Num());
+        }
+        if (Warn)
+        {
+            Warn->Logf(ELogVerbosity::Error, TEXT("HL2BSPImporter: Failed to parse BSP. See Output Log for details."));
+        }
         return nullptr;
     }
 
@@ -353,6 +418,8 @@ UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass* InClass, UObject* InP
     UStaticMesh* Mesh = NewObject<UStaticMesh>(InParent, InClass ? InClass : UStaticMesh::StaticClass(), InName, Flags);
     if (!Mesh)
     {
+        UE_LOG(LogHL2BSPImporter, Error, TEXT("NewObject<UStaticMesh> returned null (parent=%s, name=%s)."), *GetNameSafe(InParent), *InName.ToString());
+        UE_LOG(LogTemp, Error, TEXT("[HL2BSPImporter] NewObject<UStaticMesh> failed."));
         bOutOperationCanceled = true;
         return nullptr;
     }
@@ -376,8 +443,21 @@ UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass* InClass, UObject* InP
     }
 
     // Compute normals/tangents from geometry (UE5.6 flags-based API)
-    FStaticMeshOperations::ComputeTangentsAndNormals(MD, EComputeNTBsFlags::Normals | EComputeNTBsFlags::Tangents);
-    UE_LOG(LogHL2BSPImporter, Log, TEXT("Computed normals/tangents."));
+    const int32 NumTris = MD.Triangles().Num();
+    if (NumTris == 0)
+    {
+        UE_LOG(LogHL2BSPImporter, Warning, TEXT("MeshDescription has 0 triangles. Skipping tangent/normal computation."));
+        UE_LOG(LogTemp, Warning, TEXT("[HL2BSPImporter] 0 triangles produced from BSP. Skipping NTB compute."));
+    }
+    else
+    {
+        FStaticMeshOperations::ComputeTangentsAndNormals(MD, EComputeNTBsFlags::Normals | EComputeNTBsFlags::Tangents);
+        UE_LOG(LogHL2BSPImporter, Log, TEXT("Computed normals/tangents for %d triangles."), NumTris);
+    }
+    if (Warn)
+    {
+        Warn->Logf(ELogVerbosity::Display, TEXT("HL2BSPImporter: Geometry ready. Building mesh (materials=%d, tris=%d)"), Mesh->GetStaticMaterials().Num(), MD.Triangles().Num());
+    }
 
     // Configure Nanite before build
     Mesh->NaniteSettings.bEnabled = Sets->bBuildNanite;
@@ -386,6 +466,10 @@ UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass* InClass, UObject* InP
     TArray<const FMeshDescription*> Descs; Descs.Add(&MD);
     Mesh->BuildFromMeshDescriptions(Descs);
     UE_LOG(LogHL2BSPImporter, Log, TEXT("StaticMesh built from MeshDescription. LODs=%d Materials=%d"), Mesh->GetNumLODs(), Mesh->GetStaticMaterials().Num());
+    if (Warn)
+    {
+        Warn->Logf(ELogVerbosity::Display, TEXT("HL2BSPImporter: Mesh built. LODs=%d Materials=%d"), Mesh->GetNumLODs(), Mesh->GetStaticMaterials().Num());
+    }
 
     // Collision settings
     if (Sets->bImportCollision)

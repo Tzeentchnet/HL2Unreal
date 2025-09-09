@@ -1,4 +1,5 @@
 #include "BspFile.h"
+#include "HL2BSPImporter.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 
@@ -36,14 +37,16 @@ bool FBspFile::LoadFromFile(const FString& Filename)
     TArray<uint8> Bytes;
     if (!FFileHelper::LoadFileToArray(Bytes, *Filename))
     {
+        UE_LOG(LogHL2BSPImporter, Error, TEXT("BSP LoadFileToArray failed: %s"), *Filename);
         return false;
     }
 
-    if (Bytes.Num() < (int32)sizeof(FBspHeader)) return false;
+    if (Bytes.Num() < (int32)sizeof(FBspHeader)) { UE_LOG(LogHL2BSPImporter, Error, TEXT("BSP too small for header: %s (size=%d)"), *Filename, Bytes.Num()); return false; }
     FBspHeader H{};
     FMemory::Memcpy(&H, Bytes.GetData(), sizeof(FBspHeader));
     const int32 VBSP = int32('V') | (int32('B') << 8) | (int32('S') << 16) | (int32('P') << 24);
-    if (H.Ident != VBSP) return false;
+    if (H.Ident != VBSP) { UE_LOG(LogHL2BSPImporter, Error, TEXT("Wrong BSP magic. Expected 'VBSP' got 0x%08x for %s"), H.Ident, *Filename); return false; }
+    UE_LOG(LogHL2BSPImporter, Log, TEXT("VBSP header: Version=%d MapRevision=%d"), H.Version, H.MapRevision);
 
     const FLumpInfo& LVerts = H.Lumps[3]; // LUMP_VERTEXES
     const FLumpInfo& LEdges = H.Lumps[12]; // LUMP_EDGES
@@ -57,39 +60,42 @@ bool FBspFile::LoadFromFile(const FString& Filename)
     // Load vertices
     const int32 NumSrcVerts = LVerts.Len / sizeof(DVertex);
     TArray<DVertex> SrcVerts; SrcVerts.SetNum(NumSrcVerts);
-    if (!ReadArray(Bytes, LVerts.Ofs, LVerts.Len, SrcVerts.GetData())) return false;
+    if (!ReadArray(Bytes, LVerts.Ofs, LVerts.Len, SrcVerts.GetData())) { UE_LOG(LogHL2BSPImporter, Error, TEXT("Failed reading LUMP_VERTEXES (ofs=%d len=%d)"), LVerts.Ofs, LVerts.Len); return false; }
 
     // Load edges
     const int32 NumEdges = LEdges.Len / sizeof(DEdge);
     TArray<DEdge> Edges; Edges.SetNum(NumEdges);
-    if (!ReadArray(Bytes, LEdges.Ofs, LEdges.Len, Edges.GetData())) return false;
+    if (!ReadArray(Bytes, LEdges.Ofs, LEdges.Len, Edges.GetData())) { UE_LOG(LogHL2BSPImporter, Error, TEXT("Failed reading LUMP_EDGES (ofs=%d len=%d)"), LEdges.Ofs, LEdges.Len); return false; }
 
     // Load surfedges (int32 indices, may be negative)
     const int32 NumSurfEdges = LSurfEdges.Len / sizeof(int32);
     TArray<int32> SurfEdges; SurfEdges.SetNum(NumSurfEdges);
-    if (!ReadArray(Bytes, LSurfEdges.Ofs, LSurfEdges.Len, SurfEdges.GetData())) return false;
+    if (!ReadArray(Bytes, LSurfEdges.Ofs, LSurfEdges.Len, SurfEdges.GetData())) { UE_LOG(LogHL2BSPImporter, Error, TEXT("Failed reading LUMP_SURFEDGES (ofs=%d len=%d)"), LSurfEdges.Ofs, LSurfEdges.Len); return false; }
 
     // Load faces
     const int32 NumFaces = LFaces.Len / sizeof(DFace);
     TArray<DFace> FacesSrc; FacesSrc.SetNum(NumFaces);
-    if (!ReadArray(Bytes, LFaces.Ofs, LFaces.Len, FacesSrc.GetData())) return false;
+    if (!ReadArray(Bytes, LFaces.Ofs, LFaces.Len, FacesSrc.GetData())) { UE_LOG(LogHL2BSPImporter, Error, TEXT("Failed reading LUMP_FACES (ofs=%d len=%d)"), LFaces.Ofs, LFaces.Len); return false; }
 
     // Load texinfo
     const int32 NumTexInfos = LTexInfo.Len / sizeof(DTexInfo);
     TArray<DTexInfo> TexInfos; TexInfos.SetNum(NumTexInfos);
-    if (!ReadArray(Bytes, LTexInfo.Ofs, LTexInfo.Len, TexInfos.GetData())) return false;
+    if (!ReadArray(Bytes, LTexInfo.Ofs, LTexInfo.Len, TexInfos.GetData())) { UE_LOG(LogHL2BSPImporter, Error, TEXT("Failed reading LUMP_TEXINFO (ofs=%d len=%d)"), LTexInfo.Ofs, LTexInfo.Len); return false; }
 
     // Load texdata
     const int32 NumTexData = LTexData.Len / sizeof(DTexData);
     TArray<DTexData> TexDatas; TexDatas.SetNum(NumTexData);
-    if (!ReadArray(Bytes, LTexData.Ofs, LTexData.Len, TexDatas.GetData())) return false;
+    if (!ReadArray(Bytes, LTexData.Ofs, LTexData.Len, TexDatas.GetData())) { UE_LOG(LogHL2BSPImporter, Error, TEXT("Failed reading LUMP_TEXDATA (ofs=%d len=%d)"), LTexData.Ofs, LTexData.Len); return false; }
 
     // Load texture string table and data
     const int32 NumStrOffsets = LTexStrTab.Len / sizeof(int32);
     TArray<int32> StrOffsets; StrOffsets.SetNum(NumStrOffsets);
-    if (!ReadArray(Bytes, LTexStrTab.Ofs, LTexStrTab.Len, StrOffsets.GetData())) return false;
+    if (!ReadArray(Bytes, LTexStrTab.Ofs, LTexStrTab.Len, StrOffsets.GetData())) { UE_LOG(LogHL2BSPImporter, Error, TEXT("Failed reading LUMP_TEXDATA_STRING_TABLE (ofs=%d len=%d)"), LTexStrTab.Ofs, LTexStrTab.Len); return false; }
     TArray<uint8> StrData; StrData.SetNum(LTexStrData.Len);
-    if (!ReadArray(Bytes, LTexStrData.Ofs, LTexStrData.Len, StrData.GetData())) return false;
+    if (!ReadArray(Bytes, LTexStrData.Ofs, LTexStrData.Len, StrData.GetData())) { UE_LOG(LogHL2BSPImporter, Error, TEXT("Failed reading LUMP_TEXDATA_STRING_DATA (ofs=%d len=%d)"), LTexStrData.Ofs, LTexStrData.Len); return false; }
+
+    UE_LOG(LogHL2BSPImporter, Log, TEXT("VBSP header OK. Verts=%d Edges=%d SurfEdges=%d Faces=%d TexInfo=%d TexData=%d StrTab=%d"),
+        NumSrcVerts, NumEdges, NumSurfEdges, NumFaces, NumTexInfos, NumTexData, NumStrOffsets);
 
     auto GetTexName = [&](int32 TexInfoIndex) -> FString
     {
@@ -272,5 +278,7 @@ bool FBspFile::LoadFromFile(const FString& Filename)
         Entities = MoveTemp(Out);
     }
 
+    UE_LOG(LogHL2BSPImporter, Log, TEXT("BSP parsed: OutVerts=%d OutFaces=%d DispInfos=%d DispVerts=%d Entities=%d"),
+        Vertices.Num(), Faces.Num(), DispInfos.Num(), DispVerts.Num(), Entities.Num());
     return true;
 }
