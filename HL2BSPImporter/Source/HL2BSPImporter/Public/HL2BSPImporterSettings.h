@@ -4,7 +4,7 @@
 #include "Engine/DeveloperSettings.h"
 
 UCLASS(config = HL2BSPImporter, defaultconfig, meta = (DisplayName = "HL2 BSP Importer"))
-class UHL2BSPImporterSettings : public UDeveloperSettings
+class HL2BSPIMPORTER_API UHL2BSPImporterSettings : public UDeveloperSettings
 {
     GENERATED_BODY()
 public:

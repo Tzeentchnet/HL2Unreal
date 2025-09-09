@@ -5,14 +5,14 @@
 #include "HL2EntityTable.generated.h"
 
 USTRUCT()
-struct FHL2EntityTableRow : public FTableRowBase
+struct HL2BSPIMPORTER_API FHL2EntityTableRow : public FTableRowBase
 {
     GENERATED_BODY()
     UPROPERTY(EditAnywhere, Category = "HL2") FHL2Entity Entity;
 };
 
 UCLASS()
-class UHL2EntityTable : public UDataTable
+class HL2BSPIMPORTER_API UHL2EntityTable : public UDataTable
 {
     GENERATED_BODY()
 public:

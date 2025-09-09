@@ -4,7 +4,7 @@
 #include "HL2BSPImporterFactory.generated.h"
 
 UCLASS()
-class UHL2BSPImporterFactory : public UFactory
+class HL2BSPIMPORTER_API UHL2BSPImporterFactory : public UFactory
 {
     GENERATED_BODY()
 public:

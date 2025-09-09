@@ -3,7 +3,7 @@
 #include "HL2BSPImporterTypes.generated.h"
 
 USTRUCT()
-struct FHL2Entity
+struct HL2BSPIMPORTER_API FHL2Entity
 {
     GENERATED_BODY()
     UPROPERTY() FString Name;
@@ -14,7 +14,7 @@ struct FHL2Entity
 };
 
 USTRUCT()
-struct FHL2MaterialEntry
+struct HL2BSPIMPORTER_API FHL2MaterialEntry
 {
     GENERATED_BODY()
     UPROPERTY() FString TextureName;
