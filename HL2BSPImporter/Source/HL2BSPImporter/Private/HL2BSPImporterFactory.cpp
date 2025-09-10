@@ -458,6 +458,8 @@ UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass* InClass, UObject* InP
     int32 InvalidRefTris = 0;
     int32 DegenerateTris = 0;
     {
+        FStaticMeshAttributes AttrsCheck(MD);
+        TVertexAttributesRef<FVector3f> VPosCheck = AttrsCheck.GetVertexPositions();
         for (const FTriangleID TriID : MD.Triangles().GetElementIDs())
         {
             if (!MD.IsTriangleValid(TriID)) { ++InvalidRefTris; continue; }
@@ -471,9 +473,9 @@ UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass* InClass, UObject* InP
             const FVertexID V1 = MD.GetVertexInstanceVertex(VI1);
             const FVertexID V2 = MD.GetVertexInstanceVertex(VI2);
             if (!MD.IsVertexValid(V0) || !MD.IsVertexValid(V1) || !MD.IsVertexValid(V2)) { ++InvalidRefTris; continue; }
-            const FVector3f P0 = VertexPositions[V0];
-            const FVector3f P1 = VertexPositions[V1];
-            const FVector3f P2 = VertexPositions[V2];
+            const FVector3f P0 = VPosCheck[V0];
+            const FVector3f P1 = VPosCheck[V1];
+            const FVector3f P2 = VPosCheck[V2];
             const FVector A = (FVector)P1 - (FVector)P0;
             const FVector B = (FVector)P2 - (FVector)P0;
             const double Area2 = A.Cross(B).SizeSquared();
