@@ -158,6 +158,11 @@ static FMeshDescription BuildMeshDescriptionFromBSP(const FBspFile& Bsp, const U
     TVertexInstanceAttributesRef<FVector2f> InstanceUVs = Attrs.GetVertexInstanceUVs();
     InstanceUVs.SetNumChannels(1);
 
+    // Ensure triangle-level attributes exist for NTB computation
+    TTriangleAttributesRef<FVector3f> TriangleNormals = Attrs.GetTriangleNormals();
+    TTriangleAttributesRef<FVector3f> TriangleTangents = Attrs.GetTriangleTangents();
+    TTriangleAttributesRef<float> TriangleBinormalSigns = Attrs.GetTriangleBinormalSigns();
+
     TPolygonGroupAttributesRef<FName> PolyGroupMaterialNames = Attrs.GetPolygonGroupMaterialSlotNames();
 
     // Map texture name -> polygon group
@@ -443,35 +448,39 @@ UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass* InClass, UObject* InP
         Mesh->GetStaticMaterials().Add(FStaticMaterial(Mat, Slot));
     }
 
-    // Ensure MeshDescription arrays are compact before NTB compute
-    {
-        const int32 TriNum = MD.Triangles().Num();
-        const int32 TriSize = MD.Triangles().GetArraySize();
-        const int32 VertNum = MD.Vertices().Num();
-        const int32 VertSize = MD.Vertices().GetArraySize();
-        const int32 VINum = MD.VertexInstances().Num();
-        const int32 VISize = MD.VertexInstances().GetArraySize();
-        UE_LOG(LogHL2BSPImporter, Log, TEXT("MeshDesc sizes before compact: Tri=%d/%d Vert=%d/%d VI=%d/%d"), TriNum, TriSize, VertNum, VertSize, VINum, VISize);
-        if (TriNum != TriSize || VertNum != VertSize || VINum != VISize)
-        {
-            UE_LOG(LogHL2BSPImporter, Warning, TEXT("MeshDesc arrays not compact; compacting before NTB compute."));
-            FStaticMeshOperations::CompactMeshDescription(MD);
-            const int32 TriNum2 = MD.Triangles().Num();
-            const int32 TriSize2 = MD.Triangles().GetArraySize();
-            const int32 VertNum2 = MD.Vertices().Num();
-            const int32 VertSize2 = MD.Vertices().GetArraySize();
-            const int32 VINum2 = MD.VertexInstances().Num();
-            const int32 VISize2 = MD.VertexInstances().GetArraySize();
-            UE_LOG(LogHL2BSPImporter, Log, TEXT("MeshDesc sizes after compact: Tri=%d/%d Vert=%d/%d VI=%d/%d"), TriNum2, TriSize2, VertNum2, VertSize2, VINum2, VISize2);
-        }
-    }
+    // Log MeshDescription array sizes (UE5.6 has no CompactMeshDescription helper)
+    const int32 TriNum = MD.Triangles().Num();
+    const int32 TriSize = MD.Triangles().GetArraySize();
+    const int32 VertNum = MD.Vertices().Num();
+    const int32 VertSize = MD.Vertices().GetArraySize();
+    const int32 VINum = MD.VertexInstances().Num();
+    const int32 VISize = MD.VertexInstances().GetArraySize();
+    UE_LOG(LogHL2BSPImporter, Log, TEXT("MeshDesc sizes: Tri=%d/%d Vert=%d/%d VI=%d/%d"), TriNum, TriSize, VertNum, VertSize, VINum, VISize);
 
-    // Compute normals/tangents from geometry (UE5.6 flags-based API)
-    const int32 NumTris = MD.Triangles().Num();
+    // Compute normals/tangents from geometry (UE5.6 flags-based API). If arrays aren't compact, fallback to flat normals.
+    const int32 NumTris = TriNum;
+    const bool bCompact = (TriNum == TriSize) && (VertNum == VertSize) && (VINum == VISize);
     if (NumTris == 0)
     {
         UE_LOG(LogHL2BSPImporter, Warning, TEXT("MeshDescription has 0 triangles. Skipping tangent/normal computation."));
         UE_LOG(LogTemp, Warning, TEXT("[HL2BSPImporter] 0 triangles produced from BSP. Skipping NTB compute."));
+    }
+    else if (!bCompact)
+    {
+        UE_LOG(LogHL2BSPImporter, Warning, TEXT("MeshDescription arrays not compact; generating flat triangle normals as fallback."));
+        FStaticMeshAttributes AttrsLocal(MD);
+        TVertexAttributesRef<FVector3f> VPos = AttrsLocal.GetVertexPositions();
+        TVertexInstanceAttributesRef<FVector3f> VINormals = AttrsLocal.GetVertexInstanceNormals();
+        for (const FTriangleID TriID : MD.Triangles().GetElementIDs())
+        {
+            TArrayView<const FVertexInstanceID> Vis = MD.GetTriangleVertexInstances(TriID);
+            if (Vis.Num() != 3) continue;
+            const FVector3f P0 = VPos[MD.GetVertexInstanceVertex(Vis[0])];
+            const FVector3f P1 = VPos[MD.GetVertexInstanceVertex(Vis[1])];
+            const FVector3f P2 = VPos[MD.GetVertexInstanceVertex(Vis[2])];
+            const FVector3f N = FVector3f(((FVector)P1 - (FVector)P0).Cross((FVector)P2 - (FVector)P0).GetSafeNormal());
+            VINormals[Vis[0]] = N; VINormals[Vis[1]] = N; VINormals[Vis[2]] = N;
+        }
     }
     else
     {
