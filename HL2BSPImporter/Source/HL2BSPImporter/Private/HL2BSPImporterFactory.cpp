@@ -19,6 +19,7 @@
 #include "Serialization/JsonSerializer.h"
 #include "Misc/PackageName.h"
 #include "HAL/FileManager.h"
+#include "Misc/FeedbackContext.h"
 
 static TMap<FString, UMaterialInterface*> GMaterialMap;
 
@@ -440,6 +441,29 @@ UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass* InClass, UObject* InP
             Mat = UMaterial::GetDefaultMaterial(static_cast<EMaterialDomain>(0));
         }
         Mesh->GetStaticMaterials().Add(FStaticMaterial(Mat, Slot));
+    }
+
+    // Ensure MeshDescription arrays are compact before NTB compute
+    {
+        const int32 TriNum = MD.Triangles().Num();
+        const int32 TriSize = MD.Triangles().GetArraySize();
+        const int32 VertNum = MD.Vertices().Num();
+        const int32 VertSize = MD.Vertices().GetArraySize();
+        const int32 VINum = MD.VertexInstances().Num();
+        const int32 VISize = MD.VertexInstances().GetArraySize();
+        UE_LOG(LogHL2BSPImporter, Log, TEXT("MeshDesc sizes before compact: Tri=%d/%d Vert=%d/%d VI=%d/%d"), TriNum, TriSize, VertNum, VertSize, VINum, VISize);
+        if (TriNum != TriSize || VertNum != VertSize || VINum != VISize)
+        {
+            UE_LOG(LogHL2BSPImporter, Warning, TEXT("MeshDesc arrays not compact; compacting before NTB compute."));
+            FStaticMeshOperations::CompactMeshDescription(MD);
+            const int32 TriNum2 = MD.Triangles().Num();
+            const int32 TriSize2 = MD.Triangles().GetArraySize();
+            const int32 VertNum2 = MD.Vertices().Num();
+            const int32 VertSize2 = MD.Vertices().GetArraySize();
+            const int32 VINum2 = MD.VertexInstances().Num();
+            const int32 VISize2 = MD.VertexInstances().GetArraySize();
+            UE_LOG(LogHL2BSPImporter, Log, TEXT("MeshDesc sizes after compact: Tri=%d/%d Vert=%d/%d VI=%d/%d"), TriNum2, TriSize2, VertNum2, VertSize2, VINum2, VISize2);
+        }
     }
 
     // Compute normals/tangents from geometry (UE5.6 flags-based API)
