@@ -454,6 +454,37 @@ UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass* InClass, UObject* InP
     const int32 VISize = MD.VertexInstances().GetArraySize();
     UE_LOG(LogHL2BSPImporter, Log, TEXT("MeshDesc sizes: Tri=%d/%d Vert=%d/%d VI=%d/%d"), TriNum, TriSize, VertNum, VertSize, VINum, VISize);
 
+    // Validate triangle references and detect degenerates
+    int32 InvalidRefTris = 0;
+    int32 DegenerateTris = 0;
+    {
+        for (const FTriangleID TriID : MD.Triangles().GetElementIDs())
+        {
+            if (!MD.IsTriangleValid(TriID)) { ++InvalidRefTris; continue; }
+            TArrayView<const FVertexInstanceID> Vis = MD.GetTriangleVertexInstances(TriID);
+            if (Vis.Num() != 3) { ++InvalidRefTris; continue; }
+            const FVertexInstanceID VI0 = Vis[0];
+            const FVertexInstanceID VI1 = Vis[1];
+            const FVertexInstanceID VI2 = Vis[2];
+            if (!MD.IsVertexInstanceValid(VI0) || !MD.IsVertexInstanceValid(VI1) || !MD.IsVertexInstanceValid(VI2)) { ++InvalidRefTris; continue; }
+            const FVertexID V0 = MD.GetVertexInstanceVertex(VI0);
+            const FVertexID V1 = MD.GetVertexInstanceVertex(VI1);
+            const FVertexID V2 = MD.GetVertexInstanceVertex(VI2);
+            if (!MD.IsVertexValid(V0) || !MD.IsVertexValid(V1) || !MD.IsVertexValid(V2)) { ++InvalidRefTris; continue; }
+            const FVector3f P0 = VertexPositions[V0];
+            const FVector3f P1 = VertexPositions[V1];
+            const FVector3f P2 = VertexPositions[V2];
+            const FVector A = (FVector)P1 - (FVector)P0;
+            const FVector B = (FVector)P2 - (FVector)P0;
+            const double Area2 = A.Cross(B).SizeSquared();
+            if (Area2 <= KINDA_SMALL_NUMBER)
+            {
+                ++DegenerateTris;
+            }
+        }
+        UE_LOG(LogHL2BSPImporter, Log, TEXT("MeshDesc validate: InvalidRefTris=%d DegenerateTris=%d"), InvalidRefTris, DegenerateTris);
+    }
+
     // Compute normals/tangents from geometry (UE5.6 flags-based API). If arrays aren't compact, fallback to flat normals.
     const int32 NumTris = TriNum;
     const bool bCompact = (TriNum == TriSize) && (VertNum == VertSize) && (VINum == VISize);
@@ -462,9 +493,26 @@ UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass* InClass, UObject* InP
         UE_LOG(LogHL2BSPImporter, Warning, TEXT("MeshDescription has 0 triangles. Skipping tangent/normal computation."));
         UE_LOG(LogTemp, Warning, TEXT("[HL2BSPImporter] 0 triangles produced from BSP. Skipping NTB compute."));
     }
-    else if (!bCompact)
+    else if (!bCompact || InvalidRefTris > 0)
     {
-        UE_LOG(LogHL2BSPImporter, Warning, TEXT("MeshDescription arrays not compact; generating flat triangle normals as fallback."));
+        UE_LOG(LogHL2BSPImporter, Warning, TEXT("MeshDescription not suitable for NTB compute (Compact=%s InvalidRefTris=%d). Generating flat normals."), bCompact ? TEXT("true") : TEXT("false"), InvalidRefTris);
+        FStaticMeshAttributes AttrsLocal(MD);
+        TVertexAttributesRef<FVector3f> VPos = AttrsLocal.GetVertexPositions();
+        TVertexInstanceAttributesRef<FVector3f> VINormals = AttrsLocal.GetVertexInstanceNormals();
+        for (const FTriangleID TriID : MD.Triangles().GetElementIDs())
+        {
+            TArrayView<const FVertexInstanceID> Vis = MD.GetTriangleVertexInstances(TriID);
+            if (Vis.Num() != 3) continue;
+            const FVector3f P0 = VPos[MD.GetVertexInstanceVertex(Vis[0])];
+            const FVector3f P1 = VPos[MD.GetVertexInstanceVertex(Vis[1])];
+            const FVector3f P2 = VPos[MD.GetVertexInstanceVertex(Vis[2])];
+            const FVector3f N = FVector3f(((FVector)P1 - (FVector)P0).Cross((FVector)P2 - (FVector)P0).GetSafeNormal());
+            VINormals[Vis[0]] = N; VINormals[Vis[1]] = N; VINormals[Vis[2]] = N;
+        }
+    }
+    else if (DegenerateTris > 0)
+    {
+        UE_LOG(LogHL2BSPImporter, Warning, TEXT("MeshDescription contains %d degenerate triangles; using flat normals."), DegenerateTris);
         FStaticMeshAttributes AttrsLocal(MD);
         TVertexAttributesRef<FVector3f> VPos = AttrsLocal.GetVertexPositions();
         TVertexInstanceAttributesRef<FVector3f> VINormals = AttrsLocal.GetVertexInstanceNormals();
