@@ -158,10 +158,7 @@ static FMeshDescription BuildMeshDescriptionFromBSP(const FBspFile& Bsp, const U
     TVertexInstanceAttributesRef<FVector2f> InstanceUVs = Attrs.GetVertexInstanceUVs();
     InstanceUVs.SetNumChannels(1);
 
-    // Ensure triangle-level attributes exist for NTB computation
-    TTriangleAttributesRef<FVector3f> TriangleNormals = Attrs.GetTriangleNormals();
-    TTriangleAttributesRef<FVector3f> TriangleTangents = Attrs.GetTriangleTangents();
-    TTriangleAttributesRef<float> TriangleBinormalSigns = Attrs.GetTriangleBinormalSigns();
+    // Note: UE5.6 doesn't require explicit triangle attributes for NTB compute; we rely on VertexInstance attributes
 
     TPolygonGroupAttributesRef<FName> PolyGroupMaterialNames = Attrs.GetPolygonGroupMaterialSlotNames();
 
