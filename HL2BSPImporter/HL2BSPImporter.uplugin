@@ -6,11 +6,13 @@
     "Description": "Import Half-Life 2 maps with displacements, materials, instances, correct scale",
     "Category": "Importer",
     "CreatedBy": "Your Name",
+    "CanContainContent": true,
     "Modules": [
         {
             "Name": "HL2BSPImporter",
             "Type": "Editor",
-            "LoadingPhase": "Default"
+            "LoadingPhase": "Default",
+            "WhitelistTargets": [ "Editor" ]
         }
     ]
 }

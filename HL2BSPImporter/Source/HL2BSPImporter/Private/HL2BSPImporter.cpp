@@ -1,5 +1,5 @@
-// Minimal module implementation for the HL2BSPImporter editor module
-#include "HL2BSPImporter.h" // Must be first
+// Module implementation for the HL2BSPImporter editor module.
+#include "HL2BSPImporter.h"
 #include "Modules/ModuleManager.h"
 
 DEFINE_LOG_CATEGORY(LogHL2BSPImporter);
