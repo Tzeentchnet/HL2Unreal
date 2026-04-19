@@ -915,25 +915,8 @@ UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass* InClass, UObject* InP
         MatBuilder.NumShader_Decal, MatBuilder.NumShader_Other);
 
     SlowTask.EnterProgressFrame(1.f, LOCTEXT("ImportBSP_Entities", "Creating entity table..."));
-    if (Entities.Num() > 0 && InParent)
-    {
-        const FString ParentLongPath = FPackageName::GetLongPackagePath(InParent->GetPathName());
-        const FString ShortName      = InParent->GetName() + TEXT("_Entities");
-        const FString EntityPkgName  = ParentLongPath / ShortName;
-
-        if (UPackage* EntPkg = CreatePackage(*EntityPkgName))
-        {
-            EntPkg->FullyLoad();
-            UHL2EntityTable* Table = UHL2EntityTable::CreateFromEntities(EntPkg, FName(*ShortName), Flags, Entities);
-            if (Table)
-            {
-                FAssetRegistryModule::AssetCreated(Table);
-                Table->MarkPackageDirty();
-                UE_LOG(LogHL2BSPImporter, Log, TEXT("Created Entities DataTable: %s (%d rows)"),
-                    *Table->GetPathName(), Entities.Num());
-            }
-        }
-    }
+    // Entity-table creation is deferred to after the static-prop synthesis block below, so
+    // any `prop_dynamic` / `prop_physics` rows can carry their resolved `PropMesh` asset paths.
 
     // ---------- Static props (sprp GameLump) ----------
     // Phase 9 / 9b emit instance metadata (model path + UE-space transform).
@@ -1112,6 +1095,129 @@ UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass* InClass, UObject* InP
             UE_LOG(LogHL2BSPImporter, Log,
                 TEXT("Static prop meshes: built=%d cached=%d failed=%d (unique=%d, instances=%d)"),
                 NumBuilt, NumCached, NumFailed, ModelToAsset.Num(), Props.Num());
+
+            // ---- Entity props (`prop_dynamic` / `prop_physics` / `prop_ragdoll` / etc.) ----
+            // Source emits these as point entities in the entity lump rather than via the
+            // `sprp` GameLump. We resolve the same `.mdl` triple, run the same builder, and
+            // back-assign `FHL2Entity::PropMesh`. Only the static geometry is produced —
+            // animation / physics simulation is left to the user's pipeline. Sharing the
+            // on-disk cache via TryLoad means a model already produced by the prop_static
+            // pass above is a cache hit here (no rebuild).
+            int32 EntBuilt = 0, EntCached = 0, EntFailed = 0, EntCandidates = 0;
+            TMap<FString, FSoftObjectPath> EntModelToAsset;
+            for (FHL2Entity& E : Entities)
+            {
+                if (E.Class.Len() < 5 || !E.Class.StartsWith(TEXT("prop_"))) { continue; }
+                if (E.Model.IsEmpty()) { continue; }
+                // Brush-model refs (e.g. `*23` on `prop_door_rotating`) are not .mdl paths.
+                if (E.Model.StartsWith(TEXT("*"))) { continue; }
+                FString Lower = E.Model; Lower.ToLowerInline();
+                if (!Lower.EndsWith(TEXT(".mdl"))) { continue; }
+                ++EntCandidates;
+                FString Key = NormaliseModelKey(E.Model);
+                if (E.Skin != 0)      { Key += FString::Printf(TEXT("#skin%d"), E.Skin); }
+                if (E.BodyGroup != 0) { Key += FString::Printf(TEXT("#bg%d"),   E.BodyGroup); }
+                EntModelToAsset.FindOrAdd(Key);
+            }
+
+            for (TPair<FString, FSoftObjectPath>& Pair : EntModelToAsset)
+            {
+                const FString& VariantKey = Pair.Key;
+                FString ModelKey = VariantKey;
+                int32 SkinIdx = 0;
+                int32 BodyMask = 0;
+                // Variant key suffix grammar: `<model>(#skin<N>)?(#bg<M>)?`. Strip
+                // suffixes from the right; either may be absent.
+                auto StripSuffix = [&ModelKey](const TCHAR* Tag, int32& OutVal) -> bool
+                {
+                    int32 SepIdx = INDEX_NONE;
+                    if (!ModelKey.FindLastChar(TEXT('#'), SepIdx)) { return false; }
+                    const FString Tail = ModelKey.Mid(SepIdx + 1);
+                    if (!Tail.StartsWith(Tag)) { return false; }
+                    OutVal = FCString::Atoi(*Tail.Mid(FCString::Strlen(Tag)));
+                    ModelKey = ModelKey.Left(SepIdx);
+                    return true;
+                };
+                StripSuffix(TEXT("bg"),   BodyMask);
+                StripSuffix(TEXT("skin"), SkinIdx);
+
+                FString Stem = ModelKey.LeftChop(4);
+                if (Stem.StartsWith(TEXT("models/"))) { Stem.RightChopInline(7, EAllowShrinking::No); }
+                Stem = SanitisePropSegment(Stem);
+
+                FString Dir, AssetName;
+                if (!Stem.Split(TEXT("/"), &Dir, &AssetName, ESearchCase::IgnoreCase, ESearchDir::FromEnd))
+                {
+                    Dir.Reset();
+                    AssetName = Stem;
+                }
+                if (AssetName.IsEmpty()) { ++EntFailed; continue; }
+                if (SkinIdx  != 0) { AssetName += FString::Printf(TEXT("_skin%d"), SkinIdx); }
+                if (BodyMask != 0) { AssetName += FString::Printf(TEXT("_bg%d"),   BodyMask); }
+
+                FString PkgPath = AssetRoot / TEXT("Props") / Dir;
+                while (PkgPath.EndsWith(TEXT("/"))) { PkgPath.LeftChopInline(1, EAllowShrinking::No); }
+                const FString FullObject = PkgPath / AssetName + TEXT(".") + AssetName;
+
+                FSoftObjectPath SOP(FullObject);
+                if (UStaticMesh* Existing = Cast<UStaticMesh>(SOP.TryLoad()))
+                {
+                    Pair.Value = FSoftObjectPath(Existing);
+                    ++EntCached;
+                    continue;
+                }
+
+                HL2Studio::FStudioFile Studio;
+                FString Err;
+                if (!HL2Studio::LoadModel(ModelKey, StudioRoots, Studio, Err))
+                {
+                    UE_LOG(LogHL2BSPImporter, Verbose,
+                        TEXT("Entity prop mesh skipped (%s): %s"), *ModelKey, *Err);
+                    ++EntFailed;
+                    continue;
+                }
+
+                UPackage* PropPkg = CreatePackage(*(PkgPath / AssetName));
+                if (!PropPkg)
+                {
+                    UE_LOG(LogHL2BSPImporter, Warning,
+                        TEXT("Entity prop mesh: CreatePackage failed for %s"), *(PkgPath / AssetName));
+                    ++EntFailed;
+                    continue;
+                }
+                PropPkg->FullyLoad();
+
+                UStaticMesh* M = HL2Studio::BuildStaticMesh(
+                    Studio, Sets, MatBuilder, PropPkg, FName(*AssetName), Flags, SkinIdx, BodyMask);
+                if (M)
+                {
+                    Pair.Value = FSoftObjectPath(M);
+                    ++EntBuilt;
+                }
+                else
+                {
+                    ++EntFailed;
+                }
+            }
+
+            for (FHL2Entity& E : Entities)
+            {
+                if (E.Class.Len() < 5 || !E.Class.StartsWith(TEXT("prop_"))) { continue; }
+                if (E.Model.IsEmpty() || E.Model.StartsWith(TEXT("*"))) { continue; }
+                FString Lower = E.Model; Lower.ToLowerInline();
+                if (!Lower.EndsWith(TEXT(".mdl"))) { continue; }
+                FString Key = NormaliseModelKey(E.Model);
+                if (E.Skin != 0)      { Key += FString::Printf(TEXT("#skin%d"), E.Skin); }
+                if (E.BodyGroup != 0) { Key += FString::Printf(TEXT("#bg%d"),   E.BodyGroup); }
+                if (FSoftObjectPath* Asset = EntModelToAsset.Find(Key))
+                {
+                    E.PropMesh = *Asset;
+                }
+            }
+
+            UE_LOG(LogHL2BSPImporter, Log,
+                TEXT("Entity prop meshes: built=%d cached=%d failed=%d (unique=%d, candidates=%d)"),
+                EntBuilt, EntCached, EntFailed, EntModelToAsset.Num(), EntCandidates);
         }
 
         const FString ParentLongPath = FPackageName::GetLongPackagePath(InParent->GetPathName());
@@ -1128,6 +1234,27 @@ UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass* InClass, UObject* InP
                 Table->MarkPackageDirty();
                 UE_LOG(LogHL2BSPImporter, Log, TEXT("Created StaticProps DataTable: %s (%d rows)"),
                     *Table->GetPathName(), Props.Num());
+            }
+        }
+    }
+
+    // ---------- Entity table (deferred until after entity-prop synthesis) ----------
+    if (Entities.Num() > 0 && InParent)
+    {
+        const FString ParentLongPath = FPackageName::GetLongPackagePath(InParent->GetPathName());
+        const FString ShortName      = InParent->GetName() + TEXT("_Entities");
+        const FString EntityPkgName  = ParentLongPath / ShortName;
+
+        if (UPackage* EntPkg = CreatePackage(*EntityPkgName))
+        {
+            EntPkg->FullyLoad();
+            UHL2EntityTable* Table = UHL2EntityTable::CreateFromEntities(EntPkg, FName(*ShortName), Flags, Entities);
+            if (Table)
+            {
+                FAssetRegistryModule::AssetCreated(Table);
+                Table->MarkPackageDirty();
+                UE_LOG(LogHL2BSPImporter, Log, TEXT("Created Entities DataTable: %s (%d rows)"),
+                    *Table->GetPathName(), Entities.Num());
             }
         }
     }

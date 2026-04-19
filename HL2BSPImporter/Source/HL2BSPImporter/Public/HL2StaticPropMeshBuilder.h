@@ -22,12 +22,13 @@ namespace HL2Studio
      * recomputed via MikkTSpace. LOD chain is left to Unreal's auto-LOD or
      * Nanite.
      *
-     * Bodygroup scope: emits only `Models[0]` of every bodypart (the default
-     * bodygroup state). Source's `prop_static` instances carry no bodygroup
-     * mask, so the alternate variants (broken / unbroken, head A / B / C, …)
-     * are never reachable via this entry point. They remain in
-     * `FStudioFile::BodyParts` for a future per-bodygroup build path driven
-     * from `prop_dynamic` keyvalues.
+     * Bodygroup scope: when `BodyMask == 0` (default) emits only `Models[0]` of every
+     * bodypart (the default bodygroup state, used by `prop_static`). For non-zero masks
+     * (driven by the `body` / `bodygroup` keyvalue on `prop_dynamic` / `prop_physics`),
+     * the per-bodypart model index is decoded as
+     * `idx = (BodyMask / base[bp]) % BodyParts[bp].Models.Num()`, where
+     * `base[0] = 1` and `base[bp+1] = base[bp] * BodyParts[bp].Models.Num()`. Out-of-
+     * range computed indices fall back to `Models[0]` for that bodypart.
      *
      * Skin: when `SkinIndex` is in range and the model carries a skin table,
      * each `mstudiomesh_t::material` ref-slot is remapped through
@@ -51,6 +52,7 @@ namespace HL2Studio
      * @param Flags         Object flags from the import call.
      * @param SkinIndex     Skin family to bake (0 = default). Out-of-range
      *                      values silently fall back to identity skin 0.
+     * @param BodyMask      Source `body` keyvalue (0 = default bodygroup).
      * @return  The created UStaticMesh, or null on failure.
      */
     HL2BSPIMPORTER_API UStaticMesh* BuildStaticMesh(
@@ -60,5 +62,6 @@ namespace HL2Studio
         UObject* Outer,
         FName Name,
         EObjectFlags Flags,
-        int32 SkinIndex = 0);
+        int32 SkinIndex = 0,
+        int32 BodyMask = 0);
 }

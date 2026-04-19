@@ -77,7 +77,8 @@ namespace HL2Studio
         UObject* Outer,
         FName Name,
         EObjectFlags Flags,
-        int32 SkinIndex)
+        int32 SkinIndex,
+        int32 BodyMask)
     {
         if (!Outer)
         {
@@ -153,13 +154,23 @@ namespace HL2Studio
             return RefSlot;
         };
 
-        // Default-bodygroup state: emit only Models[0] of every bodypart.
-        // `prop_static` instances carry no bodygroup mask, so alternate
-        // models would otherwise be superimposed on top of the default.
+        // Bodygroup decode: Source's `body` keyvalue is a packed integer mask. The
+        // selected model index for bodypart `bp` is `(mask / base[bp]) % nummodels[bp]`,
+        // where `base[0] = 1` and `base[bp+1] = base[bp] * nummodels[bp]`. BodyMask 0
+        // (the prop_static default and the prop_dynamic default) selects Models[0] of
+        // every bodypart, matching the prior Phase 12a behaviour exactly.
+        int32 BodypartBase = 1;
         for (const FStudioBodyPart& Bp : Studio.BodyParts)
         {
             if (Bp.Models.Num() == 0) { continue; }
-            const FStudioModel& Model = Bp.Models[0];
+            int32 ModelIdx = 0;
+            if (BodyMask != 0)
+            {
+                ModelIdx = (BodyMask / BodypartBase) % Bp.Models.Num();
+                if (!Bp.Models.IsValidIndex(ModelIdx)) { ModelIdx = 0; }
+            }
+            BodypartBase *= Bp.Models.Num();
+            const FStudioModel& Model = Bp.Models[ModelIdx];
             {
                 for (const FStudioMesh& Mesh : Model.Meshes)
                 {
@@ -346,8 +357,8 @@ namespace HL2Studio
         if (UPackage* Pkg = M->GetOutermost()) { Pkg->MarkPackageDirty(); }
 
         UE_LOG(LogHL2BSPImporter, Log,
-            TEXT("Static prop mesh built: %s (%lld tris, %d slots, skin=%d) from %s"),
-            *M->GetPathName(), (long long)EmittedTriangles, SlotOrder.Num(), SkinIndex, *Studio.MdlPath);
+            TEXT("Static prop mesh built: %s (%lld tris, %d slots, skin=%d, body=%d) from %s"),
+            *M->GetPathName(), (long long)EmittedTriangles, SlotOrder.Num(), SkinIndex, BodyMask, *Studio.MdlPath);
         return M;
     }
 }

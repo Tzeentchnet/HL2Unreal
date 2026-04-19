@@ -33,9 +33,29 @@ struct HL2BSPIMPORTER_API FHL2Entity
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "HL2") FRotator Rotation;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "HL2") FString  Model;
 
+    // `skin` keyvalue, used by `prop_dynamic` / `prop_physics` / `prop_ragdoll` to pick a
+    // material variant from the MDL skin table. 0 = default. Mirrors `FHL2StaticProp::Skin`.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "HL2") int32    Skin = 0;
+
+    // Source `body` (a.k.a. `bodygroup`) keyvalue: a packed integer mask that selects one model
+    // per bodypart from the MDL's `BodyParts[bp].Models[]` table. Decode is
+    // `idx = (mask / base[bp]) % BodyParts[bp].Models.Num()`, where `base[0] = 1` and
+    // `base[bp+1] = base[bp] * BodyParts[bp].Models.Num()`. 0 = default bodygroup
+    // (Models[0] of every bodypart). `prop_static` carries no bodygroup mask; this field is
+    // entity-only.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "HL2") int32    BodyGroup = 0;
+
     // For brush entities (model is "*N"), this points at the per-brush-model UStaticMesh asset
     // synthesised by the importer. Empty for point entities or when no asset was produced.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "HL2") FSoftObjectPath BrushMesh;
+
+    // For point-entity props (`prop_dynamic`, `prop_physics`, `prop_ragdoll`, etc.) whose
+    // `Model` is a `.mdl` path resolved under `SourceContentRoots`, this points at the
+    // synthesized UStaticMesh asset (per `(Model, Skin)` variant). Empty for non-prop
+    // entities, brush entities (use `BrushMesh`), or when synthesis failed / was disabled.
+    // Note: this is a static mesh — animation / physics simulation is left to the user's
+    // pipeline (no Skeletal asset is produced).
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "HL2") FSoftObjectPath PropMesh;
 
     // Source I/O output connections fired by this entity. Preserves duplicate output keys so
     // a single `OnTrigger` with three downstream targets produces three rows here.

@@ -2,9 +2,27 @@
 
 All notable changes to this plugin are documented in this file. Forward-looking work (open follow-ups, partial features, deferred items) lives in [ROADMAP.md](ROADMAP.md); when a roadmap entry ships, move it here under the appropriate phase.
 
-The format is loosely based on [Keep a Changelog](https://keepachangelog.com/), and this project tracks Unreal Engine 5.6+ compatibility.
+The format is loosely based on [Keep a Changelog](https://keepachangelog.com/), and this project tracks Unreal Engine 5.7+ compatibility (5.6 was the prior baseline through Phase 12d).
 
 ## [Unreleased]
+
+### Added — Per-bodygroup variant build path (Phase 12d)
+
+- `HL2StaticPropMeshBuilder::BuildStaticMesh` gained a `BodyMask` parameter (default 0) that decodes Source's packed `body` keyvalue into a per-bodypart model index using the canonical `idx = (mask / base[bp]) % BodyParts[bp].Models.Num()` formula, where `base[0] = 1` and `base[bp+1] = base[bp] * BodyParts[bp].Models.Num()`. `BodyMask == 0` keeps the Phase 12a default-bodygroup behaviour exactly (`Models[0]` of every bodypart), so `prop_static` output is byte-identical. Out-of-range computed indices fall back to `Models[0]` for the offending bodypart.
+- `FHL2Entity` gained an `int32 BodyGroup` (default 0) field; the entity-text parser in `BspFile.cpp` reads either the canonical Source `body` keyvalue or the `bodygroup` alias (preferring `body` on ties, removing both from the keyvalue map). `prop_static` rows do not get a bodygroup field — the `sprp` GameLump carries no mask.
+- Factory entity-prop synthesis now extends the `(model, skin)` dedup key with an optional `#bg<N>` suffix (full grammar: `<model>(#skin<N>)?(#bg<M>)?`), and appends `_bg<N>` to the asset filename for non-zero masks (stacked as `_skin{N}_bg{M}` when both vary). Variant decoding uses a small suffix-strip helper that walks the key right-to-left so either suffix may be absent. The `prop_static` synthesis pass is unchanged — those rows always pass `BodyMask = 0`, preserving the Phase 12 asset paths exactly.
+- `Static prop mesh built: ...` log line now includes `body=N` alongside `skin=N` so per-bodygroup builds are observable. The end-of-import summary lines are unchanged in shape.
+- Multi-bodygroup props (`combine_intmonitor02`, citizens with head-A/B/C, broken/unbroken pairs, etc.) referenced from `prop_dynamic` / `prop_physics` with a non-zero `body` keyvalue now bake the correct per-bodypart variant set instead of silently collapsing to the default. No new settings or .ini entries.
+
+### Added — Entity-prop static-mesh synthesis (Phase 12c)
+
+- Source point-entity props (`prop_dynamic`, `prop_physics`, `prop_ragdoll`, `prop_dynamic_override`, `prop_physics_multiplayer`, etc.) are emitted as `FHL2Entity` rows in the entity lump rather than via the `sprp` GameLump, so they previously bypassed the Phase 12 mesh-synthesis pass entirely. The factory now runs a parallel synthesis block that walks `Entities` looking for any row whose `Class` starts with `prop_` and whose `Model` resolves to a `.mdl` path (brush refs `*N` are skipped), dedups by `(model, skin)`, and back-assigns a new `FHL2Entity::PropMesh` `FSoftObjectPath` field per row.
+- New `FHL2Entity::Skin` (`int32`, default 0) captures the `skin` keyvalue at parse time. The entity-text parser in `BspFile.cpp` now reads it via the existing `KV.RemoveAndCopyValue` path, mirroring `origin` / `angles` / `model` extraction. Missing / non-numeric values default to 0.
+- Synthesis re-uses the same `HL2Studio::LoadModel` + `HL2Studio::BuildStaticMesh` pipeline as `prop_static`, the same `<SynthesizedAssetRoot>/Props/<sub>/...` layout, the same `_skin{N}` filename convention, and shares the on-disk asset cache — so a model referenced by both a `prop_static` instance and a `prop_dynamic` entity is a `TryLoad` cache hit on the second pass (no rebuild).
+- The entity-table creation block was moved to *after* the static-prop synthesis so the `_Entities` DataTable carries the resolved `PropMesh` paths. The `_StaticProps` table ordering is unchanged.
+- New end-of-import log line: `Entity prop meshes: built=N cached=N failed=N (unique=N, candidates=N)`. The static-prop summary line is unchanged in shape; combined with the entity line it gives a complete picture of mesh synthesis across the level.
+- Scope: only the static geometry is produced. Skeletal asset synthesis, animation graph wiring, and physics-body simulation remain explicitly out of scope under the existing Phase 12 contract — the user's pipeline is expected to take the `PropMesh` path and either spawn it as a Static Mesh actor (default-pose preview) or substitute its own Skeletal Mesh asset for fully animated props.
+- Gated by the existing `bImportStaticPropMeshes` setting; no new settings or .ini entries.
 
 ### Added — Static-prop default bodygroup + skin-family selection (Phase 12a)
 

@@ -875,6 +875,21 @@ void FBspFile::ParseEntities(const FString& EntText, TArray<FHL2Entity>& Out) co
             }
         }
         KV.RemoveAndCopyValue(TEXT("model"), E.Model);
+        if (KV.RemoveAndCopyValue(TEXT("skin"), Tmp))
+        {
+            E.Skin = FCString::Atoi(*Tmp);
+        }
+        // Source uses `body` on prop_dynamic / prop_physics; some Hammer FGD variants and
+        // community maps spell it `bodygroup`. Accept either; `body` wins on ties.
+        if (KV.RemoveAndCopyValue(TEXT("body"), Tmp))
+        {
+            E.BodyGroup = FCString::Atoi(*Tmp);
+            KV.Remove(TEXT("bodygroup"));
+        }
+        else if (KV.RemoveAndCopyValue(TEXT("bodygroup"), Tmp))
+        {
+            E.BodyGroup = FCString::Atoi(*Tmp);
+        }
         E.Outputs = MoveTemp(PendingOutputs);
         TotalOutputs += E.Outputs.Num();
         Out.Add(MoveTemp(E));
