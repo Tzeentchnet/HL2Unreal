@@ -1,14 +1,48 @@
 > **Status: Work In Progress (Phase 11a)** — the seven `M_HL2_*` master
-> materials still need to be authored in the Unreal editor. Settings, defaults,
-> and the MIC binder are already shipped; only the `.uasset` files are missing.
+> materials still need to be generated or authored in the Unreal editor.
+> Settings, defaults, and the MIC binder are already shipped; only the
+> `.uasset` files are missing.
 
 # Authoring the HL2 master materials
 
-This guide walks an author through creating the seven `UMaterial` parents the
-HL2 BSP Importer expects under `/HL2BSPImporter/MasterMaterials/`. The
+This guide walks an author through generating or creating the seven `UMaterial`
+parents the HL2 BSP Importer expects under `/HL2BSPImporter/MasterMaterials/`. The
 parameter contract (names, types, VMT keys) lives in
 [../../Resources/MasterMaterials/README.md](../../Resources/MasterMaterials/README.md);
 this file covers **how** to build the assets in the editor.
+
+## Preferred path: run the generator
+
+The plugin includes an Unreal Editor Python generator at
+[`../../Scripts/GenerateMasterMaterials.py`](../../Scripts/GenerateMasterMaterials.py).
+Run it from an editor-capable Unreal session so the Material Editor APIs and
+shader compiler are available.
+
+Python console / Editor Utility example:
+
+```python
+exec(open(r"C:/GitHub/HL2Unreal/HL2BSPImporter/Scripts/GenerateMasterMaterials.py", "r", encoding="utf-8").read())
+```
+
+Commandlet-style example:
+
+```bat
+UnrealEditor-Cmd.exe YourProject.uproject -run=PythonScript -script="C:/GitHub/HL2Unreal/HL2BSPImporter/Scripts/GenerateMasterMaterials.py"
+```
+
+By default the script skips existing materials. To regenerate an existing set,
+edit `OVERWRITE_EXISTING = True` in the script or call:
+
+```python
+import sys
+sys.path.append(r"C:/GitHub/HL2Unreal/HL2BSPImporter/Scripts")
+import GenerateMasterMaterials
+GenerateMasterMaterials.generate_all(overwrite_existing=True)
+```
+
+After the script succeeds, save/submit the generated `.uasset` files under
+`HL2BSPImporter/Content/MasterMaterials/`. The roadmap item is not complete
+until those generated assets are actually shipped with the plugin.
 
 ## Why this is editor-only (not CLI)
 
@@ -29,11 +63,11 @@ this file covers **how** to build the assets in the editor.
    engine code.
 
 A `UnrealEditor-Cmd -run=PythonScript` approach using
-`unreal.MaterialEditingLibrary` is theoretically possible but still requires a
-running editor process and still needs every graph designed by hand first;
-authoring once in the Material Editor is simpler and easier to maintain.
+`unreal.MaterialEditingLibrary` still requires a running editor process. The
+generator script automates the graph construction, but if an engine-version API
+change breaks the script, the manual checklist below remains the fallback.
 
-## Per-asset checklist
+## Manual fallback: per-asset checklist
 
 Right-click in the Content Browser at `/HL2BSPImporter/MasterMaterials/` →
 **Material** → name the asset **exactly** as listed (the importer matches by

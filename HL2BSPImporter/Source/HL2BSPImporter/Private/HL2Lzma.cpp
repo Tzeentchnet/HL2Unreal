@@ -69,8 +69,8 @@ bool HL2Lzma::DecompressSourceLump(
             DebugName, ActualSize, (long long)MAX_DECOMPRESSED);
         return false;
     }
-    const int64 PayloadEnd = static_cast<int64>(SOURCE_LZMA_HDR) + static_cast<int64>(LzmaSize);
-    if (PayloadEnd > SourceSize)
+    const int64 LzmaSize64 = static_cast<int64>(LzmaSize);
+    if (LzmaSize64 > SourceSize - static_cast<int64>(SOURCE_LZMA_HDR))
     {
         UE_LOG(LogHL2BSPImporter, Error,
             TEXT("LZMA lump %s payload %u extends past lump (have %lld bytes after header)."),
@@ -81,6 +81,7 @@ bool HL2Lzma::DecompressSourceLump(
     const uint8* Props   = SourceBytes + 12;       // 5 bytes
     const uint8* Payload = SourceBytes + SOURCE_LZMA_HDR;
 
+    // Safe: ActualSize was checked against MAX_DECOMPRESSED, which is below MAX_int32.
     OutDecompressed.SetNumUninitialized(static_cast<int32>(ActualSize));
 
     SizeT       DestLen = ActualSize;

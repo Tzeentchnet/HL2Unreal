@@ -22,6 +22,9 @@ namespace HL2Pak
      * `..` segments are rejected. Files are written with their original (case-preserved) names
      * underneath `DestDir`, but a lower-cased mirror table is also produced for case-insensitive
      * lookups by callers that expect Source's case-insensitive content roots.
+    *
+    * Extraction is capped at 256 MiB per entry and 2 GiB total per pakfile. Entries that would
+    * exceed those caps are skipped and counted in OutStats rather than written.
      *
      * @param PakBytes  Raw bytes of the pakfile lump (already decompressed if the lump was LZMA).
      * @param DestDir   Filesystem directory to receive extracted files. Created if missing.

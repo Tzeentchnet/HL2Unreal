@@ -6,6 +6,14 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/), 
 
 ## [Unreleased]
 
+### Changed — Importer hardening
+
+- Displacement emission now validates `Power`, grid side/total counts, and `DispVertStart` ranges before any shift, allocation, or dispvert indexing. Invalid displacement rows are skipped with warnings instead of relying on unchecked `(1 << Power)` arithmetic.
+- VTF sizing now uses checked 64-bit byte counts for source images, DXT block math, mip-region strides, and final BGRA output allocation, with a 256 MiB per-image sanity cap.
+- Material synthesis now preflights configured parent material slots and emits warning-level diagnostics when the shipped/generated master materials are missing; MIC synthesis still fails closed for affected materials.
+- Pak extraction now enforces a 2 GiB aggregate extraction cap, rejects encrypted entries explicitly, validates STORE size consistency, and documents the zlib `uInt` cast invariant behind the 256 MiB per-entry cap.
+- LZMA lump handling now makes payload bounds and int32 allocation invariants explicit while preserving the existing 256 MiB decompressed-size cap.
+
 ### Added — Per-bodygroup variant build path (Phase 12d)
 
 - `HL2StaticPropMeshBuilder::BuildStaticMesh` gained a `BodyMask` parameter (default 0) that decodes Source's packed `body` keyvalue into a per-bodypart model index using the canonical `idx = (mask / base[bp]) % BodyParts[bp].Models.Num()` formula, where `base[0] = 1` and `base[bp+1] = base[bp] * BodyParts[bp].Models.Num()`. `BodyMask == 0` keeps the Phase 12a default-bodygroup behaviour exactly (`Models[0]` of every bodypart), so `prop_static` output is byte-identical. Out-of-range computed indices fall back to `Models[0]` for the offending bodypart.

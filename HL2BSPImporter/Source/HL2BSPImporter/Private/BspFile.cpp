@@ -34,6 +34,8 @@ namespace
     // Sanity caps to bound attacker-controlled lump sizes.
     constexpr int64 MAX_LUMP_BYTES  = 256 * 1024 * 1024; // 256 MB per lump
     constexpr int32 MAX_ENT_TEXT    = 32  * 1024 * 1024; // 32 MB entity text
+    constexpr int32 MIN_DISP_POWER  = 0;
+    constexpr int32 MAX_DISP_POWER  = 4; // Source displacements are authored up to power 4 (17x17 grid).
 
 #pragma pack(push, 1)
     struct FLumpInfo { int32 Ofs; int32 Len; int32 Version; int32 FourCC; };
@@ -256,6 +258,19 @@ namespace
     {
         if (SeIdx == MIN_int32) { return -1; } // out of range; caller treats as invalid
         return SeIdx < 0 ? -SeIdx : SeIdx;
+    }
+
+    bool TryGetDispGridSize(int32 Power, int32& OutSide, int32& OutTotal)
+    {
+        OutSide = 0;
+        OutTotal = 0;
+        if (Power < MIN_DISP_POWER || Power > MAX_DISP_POWER) { return false; }
+        const int64 Side64 = (int64(1) << Power) + 1;
+        const int64 Total64 = Side64 * Side64;
+        if (Side64 <= 1 || Side64 > MAX_int32 || Total64 > MAX_int32) { return false; }
+        OutSide = static_cast<int32>(Side64);
+        OutTotal = static_cast<int32>(Total64);
+        return true;
     }
 }
 
@@ -525,6 +540,19 @@ bool FBspFile::LoadFromFile(const FString& Filename)
     {
         const DDispInfo& D = DispInfosSrc[i];
         FDispInfo& O = DispInfos[i];
+        int32 DispSide = 0;
+        int32 DispTotal = 0;
+        if (!TryGetDispGridSize(D.Power, DispSide, DispTotal))
+        {
+            UE_LOG(LogHL2BSPImporter, Warning,
+                TEXT("DispInfo %d has unsupported power %d; displacement will be skipped."), i, D.Power);
+        }
+        else if (D.DispVertStart < 0 || static_cast<int64>(D.DispVertStart) + static_cast<int64>(DispTotal) > DispVertsSrc.Num())
+        {
+            UE_LOG(LogHL2BSPImporter, Warning,
+                TEXT("DispInfo %d has invalid dispvert range (start=%d total=%d dispverts=%d); displacement will be skipped."),
+                i, D.DispVertStart, DispTotal, DispVertsSrc.Num());
+        }
         O.StartPosition = FVector(D.StartPosition[0], D.StartPosition[1], D.StartPosition[2]);
         O.Power         = D.Power;
         O.VertStart     = D.DispVertStart;

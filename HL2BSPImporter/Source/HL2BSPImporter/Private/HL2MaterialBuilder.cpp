@@ -84,6 +84,26 @@ namespace HL2Mat
             return Cast<T>(SOP.TryLoad());
         }
 
+        UMaterialInterface* LoadParentMaterial(const TCHAR* SlotName, const FSoftObjectPath& SOP, bool bWarnIfMissing)
+        {
+            if (!SOP.IsValid())
+            {
+                if (bWarnIfMissing)
+                {
+                    UE_LOG(LogHL2BSPImporter, Warning, TEXT("Parent material slot %s is not configured."), SlotName);
+                }
+                return nullptr;
+            }
+            UMaterialInterface* Parent = Cast<UMaterialInterface>(SOP.TryLoad());
+            if (!Parent && bWarnIfMissing)
+            {
+                UE_LOG(LogHL2BSPImporter, Warning,
+                    TEXT("Parent material slot %s failed to load '%s'. Run Scripts/GenerateMasterMaterials.py or assign a valid override."),
+                    SlotName, *SOP.ToString());
+            }
+            return Parent;
+        }
+
         // ---- Phase 11b helpers -------------------------------------------------
 
         // Parse a Source `$color` / `$color2` / `$selfillumtint` value. Accepted forms:
@@ -241,6 +261,23 @@ namespace HL2Mat
         {
             if (!R.IsEmpty()) { Roots.Add(FPaths::ConvertRelativePathToFull(R)); }
         }
+        if (Settings->bSynthesizeMaterials)
+        {
+            int32 MissingParents = 0;
+            MissingParents += (LoadParentMaterial(TEXT("ParentMaterial_LightmappedGeneric"), Settings->ParentMaterial_LightmappedGeneric, true) ? 0 : 1);
+            MissingParents += (LoadParentMaterial(TEXT("ParentMaterial_LightmappedGeneric_Masked"), Settings->ParentMaterial_LightmappedGeneric_Masked, true) ? 0 : 1);
+            MissingParents += (LoadParentMaterial(TEXT("ParentMaterial_LightmappedGeneric_Translucent"), Settings->ParentMaterial_LightmappedGeneric_Translucent, true) ? 0 : 1);
+            MissingParents += (LoadParentMaterial(TEXT("ParentMaterial_LightmappedGeneric_Decal"), Settings->ParentMaterial_LightmappedGeneric_Decal, true) ? 0 : 1);
+            MissingParents += (LoadParentMaterial(TEXT("ParentMaterial_WorldVertexTransition"), Settings->ParentMaterial_WorldVertexTransition, true) ? 0 : 1);
+            MissingParents += (LoadParentMaterial(TEXT("ParentMaterial_VertexLitGeneric"), Settings->ParentMaterial_VertexLitGeneric, true) ? 0 : 1);
+            MissingParents += (LoadParentMaterial(TEXT("ParentMaterial_UnlitGeneric"), Settings->ParentMaterial_UnlitGeneric, true) ? 0 : 1);
+            if (MissingParents > 0)
+            {
+                UE_LOG(LogHL2BSPImporter, Warning,
+                    TEXT("Material synthesis is enabled but %d parent material slot(s) are missing; affected MIC synthesis will be skipped."),
+                    MissingParents);
+            }
+        }
     }
 
     void FBuilder::AddExtraRoot(const FString& AbsoluteRoot)
@@ -273,28 +310,22 @@ namespace HL2Mat
 
     UMaterialInterface* FBuilder::PickParent(const FString& ShaderLower, bool bMasked, bool bTranslucent) const
     {
-        auto Load = [](const FSoftObjectPath& SOP) -> UMaterialInterface*
-        {
-            if (!SOP.IsValid()) { return nullptr; }
-            return Cast<UMaterialInterface>(SOP.TryLoad());
-        };
-
         if (!Settings) { return nullptr; }
 
         const EShaderFamily Family = ClassifyShader(ShaderLower, bMasked, bTranslucent);
         switch (Family)
         {
         case EShaderFamily::WorldVertexTransition:
-            if (UMaterialInterface* M = Load(Settings->ParentMaterial_WorldVertexTransition)) { return M; }
+            if (UMaterialInterface* M = LoadParentMaterial(TEXT("ParentMaterial_WorldVertexTransition"), Settings->ParentMaterial_WorldVertexTransition, false)) { return M; }
             break;
         case EShaderFamily::Unlit:
-            if (UMaterialInterface* M = Load(Settings->ParentMaterial_UnlitGeneric)) { return M; }
+            if (UMaterialInterface* M = LoadParentMaterial(TEXT("ParentMaterial_UnlitGeneric"), Settings->ParentMaterial_UnlitGeneric, false)) { return M; }
             break;
         case EShaderFamily::VertexLit:
-            if (UMaterialInterface* M = Load(Settings->ParentMaterial_VertexLitGeneric)) { return M; }
+            if (UMaterialInterface* M = LoadParentMaterial(TEXT("ParentMaterial_VertexLitGeneric"), Settings->ParentMaterial_VertexLitGeneric, false)) { return M; }
             break;
         case EShaderFamily::Decal:
-            if (UMaterialInterface* M = Load(Settings->ParentMaterial_LightmappedGeneric_Decal)) { return M; }
+            if (UMaterialInterface* M = LoadParentMaterial(TEXT("ParentMaterial_LightmappedGeneric_Decal"), Settings->ParentMaterial_LightmappedGeneric_Decal, false)) { return M; }
             // Fall through to translucent/masked/lit if no decal parent configured.
             break;
         default: break;
@@ -303,13 +334,13 @@ namespace HL2Mat
         // LightmappedGeneric and unknown shaders -> pick by translucency / alpha test.
         if (bTranslucent)
         {
-            if (UMaterialInterface* M = Load(Settings->ParentMaterial_LightmappedGeneric_Translucent)) { return M; }
+            if (UMaterialInterface* M = LoadParentMaterial(TEXT("ParentMaterial_LightmappedGeneric_Translucent"), Settings->ParentMaterial_LightmappedGeneric_Translucent, false)) { return M; }
         }
         if (bMasked)
         {
-            if (UMaterialInterface* M = Load(Settings->ParentMaterial_LightmappedGeneric_Masked)) { return M; }
+            if (UMaterialInterface* M = LoadParentMaterial(TEXT("ParentMaterial_LightmappedGeneric_Masked"), Settings->ParentMaterial_LightmappedGeneric_Masked, false)) { return M; }
         }
-        return Load(Settings->ParentMaterial_LightmappedGeneric);
+        return LoadParentMaterial(TEXT("ParentMaterial_LightmappedGeneric"), Settings->ParentMaterial_LightmappedGeneric, false);
     }
 
     UTexture2D* FBuilder::GetOrCreateTexture(const FString& TextureKeyIn, bool bIsNormalMap)
@@ -452,8 +483,8 @@ namespace HL2Mat
         UMaterialInterface* Parent = PickParent(Doc.ShaderLower, bAlphaTest, bTranslucent);
         if (!Parent)
         {
-            UE_LOG(LogHL2BSPImporter, Verbose,
-                TEXT("No parent material configured for shader '%s' (slot '%s'); skipping synthesis."),
+            UE_LOG(LogHL2BSPImporter, Warning,
+                TEXT("No loadable parent material for shader '%s' (slot '%s'); skipping synthesis."),
                 *Doc.ShaderLower, *Key);
             ++NumMaterialsFailed;
             return nullptr;

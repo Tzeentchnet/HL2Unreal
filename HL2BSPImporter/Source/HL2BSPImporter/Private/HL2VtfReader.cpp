@@ -9,6 +9,7 @@ namespace HL2VTF
     {
         // VTF "VTF\0" little-endian.
         constexpr uint32 kVTFMagic = 0x00465456;
+        constexpr int64 kMaxImageBytes = 256ll * 1024 * 1024;
 
         FORCEINLINE int32 BlockBytesFor(EImageFormat F)
         {
@@ -48,17 +49,31 @@ namespace HL2VTF
         }
 
         // Bytes occupied by ONE 2D image of (W,H) for the given format.
-        int32 ImageSize(int32 W, int32 H, EImageFormat F)
+        bool TryImageSize(int32 W, int32 H, EImageFormat F, int64& OutBytes)
         {
-            if (W <= 0 || H <= 0) { return 0; }
+            OutBytes = 0;
+            if (W <= 0 || H <= 0) { return false; }
             if (const int32 BB = BlockBytesFor(F))
             {
-                const int32 BX = FMath::Max(1, (W + 3) / 4);
-                const int32 BY = FMath::Max(1, (H + 3) / 4);
-                return BX * BY * BB;
+                const int64 BX = FMath::Max<int64>(1, (static_cast<int64>(W) + 3) / 4);
+                const int64 BY = FMath::Max<int64>(1, (static_cast<int64>(H) + 3) / 4);
+                OutBytes = BX * BY * static_cast<int64>(BB);
+                return OutBytes > 0 && OutBytes <= kMaxImageBytes;
             }
             const int32 BPP = BytesPerPixelFor(F);
-            return BPP > 0 ? (W * H * BPP) : 0;
+            if (BPP <= 0) { return false; }
+            OutBytes = static_cast<int64>(W) * static_cast<int64>(H) * static_cast<int64>(BPP);
+            return OutBytes > 0 && OutBytes <= kMaxImageBytes;
+        }
+
+        bool TryDecodedBGRABytes(int32 W, int32 H, int32& OutBytes)
+        {
+            OutBytes = 0;
+            if (W <= 0 || H <= 0) { return false; }
+            const int64 Bytes = static_cast<int64>(W) * static_cast<int64>(H) * 4ll;
+            if (Bytes <= 0 || Bytes > kMaxImageBytes || Bytes > MAX_int32) { return false; }
+            OutBytes = static_cast<int32>(Bytes);
+            return true;
         }
 
         FORCEINLINE int32 NumFacesFromFlags(const FInfo& I)
@@ -168,7 +183,11 @@ namespace HL2VTF
                     uint8 LW = 0, LH = 0; Rh << LW; Rh << LH;
                     if (LowFmt != (int32)EImageFormat::NONE && LW > 0 && LH > 0)
                     {
-                        LowResBytes = ImageSize(LW, LH, (EImageFormat)LowFmt);
+                        int64 LowResBytes64 = 0;
+                        if (TryImageSize(LW, LH, (EImageFormat)LowFmt, LowResBytes64))
+                        {
+                            LowResBytes = static_cast<int32>(LowResBytes64);
+                        }
                     }
                 }
                 return (int64)HeaderSize + (int64)LowResBytes;
@@ -418,14 +437,15 @@ namespace HL2VTF
         {
             const int32 MW = FMath::Max(1, I.Width  >> Mip);
             const int32 MH = FMath::Max(1, I.Height >> Mip);
-            const int32 FaceBytes = ImageSize(MW, MH, I.Format);
-            if (FaceBytes <= 0)
+            int64 FaceBytes = 0;
+            if (!TryImageSize(MW, MH, I.Format, FaceBytes))
             {
-                OutError = FString::Printf(TEXT("Unsupported VTF format %d"), (int32)I.Format);
+                OutError = FString::Printf(TEXT("Unsupported or oversized VTF format/dimensions (format=%d width=%d height=%d)"),
+                    (int32)I.Format, MW, MH);
                 return false;
             }
-            const int64 MipBytes = (int64)FaceBytes * NumFaces * NumFrames * NumSlices;
-            if (Cursor + MipBytes > File.Num())
+            const int64 MipBytes = FaceBytes * static_cast<int64>(NumFaces) * static_cast<int64>(NumFrames) * static_cast<int64>(NumSlices);
+            if (MipBytes <= 0 || MipBytes > kMaxImageBytes || Cursor < 0 || Cursor > File.Num() || MipBytes > File.Num() - Cursor)
             {
                 OutError = FString::Printf(TEXT("VTF truncated reading mip %d (need %lld bytes from offset %lld, file %d)"),
                     Mip, MipBytes, Cursor, File.Num());
@@ -435,7 +455,13 @@ namespace HL2VTF
             {
                 // We want frame 0, face 0, slice 0 — that's the first FaceBytes of this region.
                 const uint8* Src = File.GetData() + Cursor;
-                Out.SetNumUninitialized(I.Width * I.Height * 4);
+                int32 DecodedBytes = 0;
+                if (!TryDecodedBGRABytes(I.Width, I.Height, DecodedBytes))
+                {
+                    OutError = FString::Printf(TEXT("Decoded VTF output too large (width=%d height=%d)."), I.Width, I.Height);
+                    return false;
+                }
+                Out.SetNumUninitialized(DecodedBytes);
                 uint8* Dst = Out.GetData();
 
                 switch (I.Format)

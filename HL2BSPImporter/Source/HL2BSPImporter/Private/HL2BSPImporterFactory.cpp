@@ -309,9 +309,28 @@ namespace
                   DI.Corners[2].IsZero() && DI.Corners[3].IsZero());
             if (!bHasCorners) { ++R.DispsSkipped; continue; }
 
-            const int32 Side  = (1 << DI.Power) + 1;
-            const int32 Total = Side * Side;
-            if (DI.VertStart < 0 || DI.VertStart + Total > DV.Num()) { ++R.DispsSkipped; continue; }
+            constexpr int32 MinDispPower = 0;
+            constexpr int32 MaxDispPower = 4;
+            if (DI.Power < MinDispPower || DI.Power > MaxDispPower)
+            {
+                UE_LOG(LogHL2BSPImporter, Warning,
+                    TEXT("Skipping displacement with unsupported power %d."), DI.Power);
+                ++R.DispsSkipped;
+                continue;
+            }
+            const int64 Side64 = (int64(1) << DI.Power) + 1;
+            const int64 Total64 = Side64 * Side64;
+            if (Side64 <= 1 || Side64 > MAX_int32 || Total64 > MAX_int32 ||
+                DI.VertStart < 0 || static_cast<int64>(DI.VertStart) + Total64 > DV.Num())
+            {
+                UE_LOG(LogHL2BSPImporter, Warning,
+                    TEXT("Skipping displacement with invalid grid/range (power=%d side=%lld total=%lld start=%d dispverts=%d)."),
+                    DI.Power, (long long)Side64, (long long)Total64, DI.VertStart, DV.Num());
+                ++R.DispsSkipped;
+                continue;
+            }
+            const int32 Side  = static_cast<int32>(Side64);
+            const int32 Total = static_cast<int32>(Total64);
 
             // Rotate quad so the corner closest to StartPosition becomes (0,0).
             const int32 StartIdx = FindDispStartCorner(DI.Corners, DI.StartPosition);

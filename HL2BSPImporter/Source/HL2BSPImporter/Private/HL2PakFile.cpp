@@ -33,6 +33,8 @@ namespace
     constexpr int32 EOCD_MAX_SCAN   = 65535 + EOCD_FIXED_SIZE; // max comment is uint16
 
     constexpr int64 MAX_ENTRY_BYTES = 256ll * 1024 * 1024; // sanity cap per entry
+    constexpr int64 MAX_TOTAL_EXTRACTED_BYTES = 2ll * 1024 * 1024 * 1024; // per pak extraction cap
+    static_assert(sizeof(uInt) >= 4, "zlib uInt must hold capped 256 MiB entry sizes");
 
     template<typename T>
     bool ReadAt(TArrayView<const uint8> Buf, int64 Offset, T& Out)
@@ -60,6 +62,13 @@ namespace
         if (Parts.Num() == 0) { return false; }
         OutRel = FString::Join(Parts, TEXT("/"));
         return true;
+    }
+
+    bool WouldExceedAggregateCap(int64 CurrentTotal, uint32 EntryBytes)
+    {
+        const int64 Entry64 = static_cast<int64>(EntryBytes);
+        return Entry64 < 0 || CurrentTotal < 0 || Entry64 > MAX_TOTAL_EXTRACTED_BYTES ||
+            CurrentTotal > MAX_TOTAL_EXTRACTED_BYTES - Entry64;
     }
 }
 
@@ -227,6 +236,20 @@ bool HL2Pak::ExtractToDirectory(
             ++OutStats.NumSkippedUnsafe;
             continue;
         }
+        if (WouldExceedAggregateCap(OutStats.TotalBytesExtracted, Cdh.UncompressedSize))
+        {
+            UE_LOG(LogHL2BSPImporter, Warning,
+                TEXT("Pakfile: extracting '%s' would exceed aggregate cap %lld bytes (current=%lld, entry=%u); skipping."),
+                *RelPath, (long long)MAX_TOTAL_EXTRACTED_BYTES, (long long)OutStats.TotalBytesExtracted, Cdh.UncompressedSize);
+            ++OutStats.NumSkippedUnsafe;
+            continue;
+        }
+        if (Cdh.BitFlag & 0x1)
+        {
+            UE_LOG(LogHL2BSPImporter, Warning, TEXT("Pakfile: encrypted entry '%s' is not supported; skipping."), *RelPath);
+            ++OutStats.NumSkippedOther;
+            continue;
+        }
 
         if (Cdh.Method == 8) // DEFLATE
         {
@@ -253,6 +276,7 @@ bool HL2Pak::ExtractToDirectory(
 
             // Raw DEFLATE (no zlib header) — windowBits = -15.
             TArray<uint8> Inflated;
+            // Safe: both sizes were checked against MAX_ENTRY_BYTES, which is below MAX_int32 and uInt max.
             Inflated.SetNumUninitialized(static_cast<int32>(Cdh.UncompressedSize));
 
             z_stream Strm{};
@@ -306,6 +330,14 @@ bool HL2Pak::ExtractToDirectory(
             ++OutStats.NumSkippedOther;
             continue;
         }
+        if (Cdh.CompressedSize != Cdh.UncompressedSize)
+        {
+            UE_LOG(LogHL2BSPImporter, Warning,
+                TEXT("Pakfile: STORE entry '%s' has mismatched sizes (comp=%u uncomp=%u); skipping."),
+                *RelPath, Cdh.CompressedSize, Cdh.UncompressedSize);
+            ++OutStats.NumFailed;
+            continue;
+        }
 
         // 3. Read local file header to find payload start.
         FLfh Lfh{};
@@ -318,7 +350,7 @@ bool HL2Pak::ExtractToDirectory(
             continue;
         }
         const int64 PayloadOfs = (int64)Cdh.LocalHeaderOffset + (int64)sizeof(FLfh) + Lfh.NameLen + Lfh.ExtraLen;
-        const int64 PayloadEnd = PayloadOfs + (int64)Cdh.UncompressedSize; // STORE: comp == uncomp
+        const int64 PayloadEnd = PayloadOfs + (int64)Cdh.UncompressedSize; // STORE: comp == uncomp, verified above
         if (PayloadOfs < 0 || PayloadEnd > PakBytes.Num())
         {
             UE_LOG(LogHL2BSPImporter, Warning,
