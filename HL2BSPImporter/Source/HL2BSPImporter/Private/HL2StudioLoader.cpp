@@ -50,11 +50,13 @@ namespace HL2Studio
 
         const FString MdlRel = NormaliseModelPath(ModelPath);
         // Source's `.dx90.vtx` is the canonical triangulated vertex-index file
-        // for desktop targets; `.vtx` (no `.dx90`) is the older fallback. We
-        // try both in order.
+        // for desktop targets; `.vtx` (no `.dx90`) and `.dx80.vtx` show up in
+        // older extracted content trees. Try the common desktop variants in
+        // order before failing the model.
         const FString VvdRel  = FPaths::ChangeExtension(MdlRel, TEXT(".vvd"));
         const FString Vtx1Rel = MdlRel.LeftChop(4) + TEXT(".dx90.vtx");
         const FString Vtx2Rel = FPaths::ChangeExtension(MdlRel, TEXT(".vtx"));
+        const FString Vtx3Rel = MdlRel.LeftChop(4) + TEXT(".dx80.vtx");
 
         const FString MdlAbs = FindFile(Roots, MdlRel);
         if (MdlAbs.IsEmpty())
@@ -70,9 +72,10 @@ namespace HL2Studio
         }
         FString VtxAbs = FindFile(Roots, Vtx1Rel);
         if (VtxAbs.IsEmpty()) { VtxAbs = FindFile(Roots, Vtx2Rel); }
+        if (VtxAbs.IsEmpty()) { VtxAbs = FindFile(Roots, Vtx3Rel); }
         if (VtxAbs.IsEmpty())
         {
-            OutError = FString::Printf(TEXT("VTX not found: %s (or %s)"), *Vtx1Rel, *Vtx2Rel);
+            OutError = FString::Printf(TEXT("VTX not found: %s (or %s, %s)"), *Vtx1Rel, *Vtx2Rel, *Vtx3Rel);
             return false;
         }
 

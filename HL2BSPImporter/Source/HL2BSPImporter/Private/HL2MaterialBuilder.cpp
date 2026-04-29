@@ -425,6 +425,93 @@ namespace HL2Mat
         return Tex;
     }
 
+    UTexture2D* FBuilder::GetOrCreateNormalAlphaSibling(const FString& TextureKeyIn)
+    {
+        const FString Key = NormalizeKey(TextureKeyIn);
+        if (Key.IsEmpty()) { return nullptr; }
+
+        if (TObjectPtr<UTexture2D>* Found = NormalAlphaCache.Find(Key))
+        {
+            // Negative sentinel (nullptr) is intentional — caller checked, no alpha.
+            return Found->Get();
+        }
+
+        // Asset name layout: same dir as the parent normal map, leaf suffixed `_a`.
+        FString PkgPath, AssetName;
+        SplitAssetPath(AssetRoot, TEXT("Textures"), Key, PkgPath, AssetName);
+        const FString AlphaAssetName = AssetName + TEXT("_a");
+
+        if (UTexture2D* Existing = FindExistingAsset<UTexture2D>(PkgPath, AlphaAssetName))
+        {
+            NormalAlphaCache.Add(Key, Existing);
+            return Existing;
+        }
+
+        const FString VtfPath = FindTextureFile(Key);
+        if (VtfPath.IsEmpty())
+        {
+            NormalAlphaCache.Add(Key, nullptr);
+            return nullptr;
+        }
+
+        HL2VTF::FInfo Info;
+        TArray<uint8> BGRA;
+        FString Err;
+        if (!HL2VTF::LoadAndDecode(VtfPath, Info, BGRA, Err))
+        {
+            UE_LOG(LogHL2BSPImporter, Verbose,
+                TEXT("Normal-alpha sibling skipped (VTF decode failed: %s) for '%s'"), *Err, *Key);
+            NormalAlphaCache.Add(Key, nullptr);
+            return nullptr;
+        }
+        if (!HL2VTF::HasMeaningfulAlpha(BGRA))
+        {
+            // Negative-cache so the next call short-circuits.
+            NormalAlphaCache.Add(Key, nullptr);
+            return nullptr;
+        }
+
+        TArray<uint8> AlphaBGRA;
+        if (!HL2VTF::ExtractAlphaToBGRA(BGRA, AlphaBGRA))
+        {
+            NormalAlphaCache.Add(Key, nullptr);
+            return nullptr;
+        }
+
+        FString FullName;
+        UPackage* Pkg = CreateAssetPackage(PkgPath, AlphaAssetName, FullName);
+        if (!Pkg)
+        {
+            UE_LOG(LogHL2BSPImporter, Warning, TEXT("CreatePackage failed for normal-alpha sibling: %s"), *FullName);
+            NormalAlphaCache.Add(Key, nullptr);
+            return nullptr;
+        }
+
+        UTexture2D* Tex = NewObject<UTexture2D>(Pkg, FName(*AlphaAssetName),
+            RF_Public | RF_Standalone | RF_Transactional);
+        if (!Tex)
+        {
+            NormalAlphaCache.Add(Key, nullptr);
+            return nullptr;
+        }
+
+#if WITH_EDITORONLY_DATA
+        Tex->Source.Init(Info.Width, Info.Height, /*NumSlices*/1, /*NumMips*/1,
+                         TSF_BGRA8, AlphaBGRA.GetData());
+#endif
+        Tex->SRGB                = false;
+        Tex->CompressionSettings = TC_Grayscale;
+        Tex->LODGroup            = TEXTUREGROUP_World;
+        Tex->UpdateResource();
+        Tex->PostEditChange();
+
+        FAssetRegistryModule::AssetCreated(Tex);
+        Pkg->MarkPackageDirty();
+
+        NormalAlphaCache.Add(Key, Tex);
+        return Tex;
+    }
+
     UMaterialInterface* FBuilder::GetOrCreateMaterial(const FString& TextureKeyIn)
     {
         if (!Settings || !Settings->bSynthesizeMaterials || AssetRoot.IsEmpty()) { return nullptr; }
@@ -477,20 +564,7 @@ namespace HL2Mat
             return nullptr;
         }
 
-        const HL2VMT::FBlock& Body = *Doc.Root;
-        const bool bTranslucent = Body.GetBool(TEXT("$translucent"), false) || Body.GetBool(TEXT("$alpha"), false);
-        const bool bAlphaTest   = Body.GetBool(TEXT("$alphatest"), false);
-        UMaterialInterface* Parent = PickParent(Doc.ShaderLower, bAlphaTest, bTranslucent);
-        if (!Parent)
-        {
-            UE_LOG(LogHL2BSPImporter, Warning,
-                TEXT("No loadable parent material for shader '%s' (slot '%s'); skipping synthesis."),
-                *Doc.ShaderLower, *Key);
-            ++NumMaterialsFailed;
-            return nullptr;
-        }
-
-        // Build the MIC asset.
+        // Build the MIC asset at the canonical path.
         FString FullName;
         UPackage* Pkg = CreateAssetPackage(PkgPath, AssetName, FullName);
         if (!Pkg)
@@ -500,17 +574,104 @@ namespace HL2Mat
             return nullptr;
         }
 
-        UMaterialInstanceConstant* MIC = NewObject<UMaterialInstanceConstant>(Pkg, FName(*AssetName),
-            RF_Public | RF_Standalone | RF_Transactional);
+        UMaterialInstanceConstant* MIC = BuildMICIntoPackage(Pkg, FName(*AssetName), Doc, Err);
         if (!MIC)
         {
+            UE_LOG(LogHL2BSPImporter, Warning, TEXT("MIC build failed (%s): %s"), *Err, *VmtPath);
+            return nullptr;
+        }
+        MaterialCache.Add(Key, MIC);
+        return MIC;
+    }
+
+    UMaterialInstanceConstant* FBuilder::BuildMICIntoPackage(
+        UPackage* TargetPackage,
+        FName AssetName,
+        const HL2VMT::FDocument& Doc,
+        FString& OutError)
+    {
+        if (!TargetPackage)
+        {
+            OutError = TEXT("BuildMICIntoPackage: TargetPackage is null");
+            ++NumMaterialsFailed;
+            return nullptr;
+        }
+        if (!Doc.Root.IsValid())
+        {
+            OutError = TEXT("BuildMICIntoPackage: parsed VMT has empty body");
+            ++NumMaterialsFailed;
+            return nullptr;
+        }
+
+        const HL2VMT::FBlock& Body = *Doc.Root;
+        const bool bTranslucent = Body.GetBool(TEXT("$translucent"), false) || Body.GetBool(TEXT("$alpha"), false);
+        const bool bAlphaTest   = Body.GetBool(TEXT("$alphatest"), false);
+        UMaterialInterface* Parent = PickParent(Doc.ShaderLower, bAlphaTest, bTranslucent);
+        if (!Parent)
+        {
+            OutError = FString::Printf(TEXT("No loadable parent material for shader '%s'"), *Doc.ShaderLower);
+            UE_LOG(LogHL2BSPImporter, Warning, TEXT("%s; skipping synthesis."), *OutError);
+            ++NumMaterialsFailed;
+            return nullptr;
+        }
+
+        // Re-import support: reuse the existing MIC if one already lives at
+        // TargetPackage/AssetName. NewObject with a colliding name asserts; the
+        // standard pattern is find-and-update.
+        UObject* ExistingObj = StaticFindObject(UObject::StaticClass(), TargetPackage, *AssetName.ToString());
+        UMaterialInstanceConstant* MIC = Cast<UMaterialInstanceConstant>(ExistingObj);
+        if (!MIC && ExistingObj)
+        {
+            ExistingObj->Rename(nullptr, GetTransientPackage(), REN_DontCreateRedirectors | REN_NonTransactional);
+        }
+        if (!MIC)
+        {
+            MIC = NewObject<UMaterialInstanceConstant>(
+                TargetPackage, AssetName, RF_Public | RF_Standalone | RF_Transactional);
+        }
+        if (!MIC)
+        {
+            OutError = TEXT("NewObject<UMaterialInstanceConstant> failed");
             ++NumMaterialsFailed;
             return nullptr;
         }
 
 #if WITH_EDITOR
         MIC->SetParentEditorOnly(Parent);
+#endif
 
+        BindMICParameters(MIC, Doc, bAlphaTest, bTranslucent);
+
+        MIC->PostEditChange();
+        FAssetRegistryModule::AssetCreated(MIC);
+        TargetPackage->MarkPackageDirty();
+
+        ++NumMaterialsCreated;
+
+        // Phase 11b shader-family histogram. Bumped per *created* MIC (not per cached
+        // hit) so the totals reflect distinct material shapes in the map.
+        switch (ClassifyShader(Doc.ShaderLower, bAlphaTest, bTranslucent))
+        {
+        case EShaderFamily::Lit:                   ++NumShader_Lit;       break;
+        case EShaderFamily::LitMasked:             ++NumShader_LitMasked; break;
+        case EShaderFamily::LitTranslucent:        ++NumShader_LitTrans;  break;
+        case EShaderFamily::Decal:                 ++NumShader_Decal;     break;
+        case EShaderFamily::WorldVertexTransition: ++NumShader_Wvt;       break;
+        case EShaderFamily::VertexLit:             ++NumShader_VertexLit; break;
+        case EShaderFamily::Unlit:                 ++NumShader_Unlit;     break;
+        default:                                   ++NumShader_Other;     break;
+        }
+        return MIC;
+    }
+
+    void FBuilder::BindMICParameters(UMaterialInstanceConstant* MIC,
+                                     const HL2VMT::FDocument& Doc,
+                                     bool bAlphaTest, bool bTranslucent)
+    {
+        if (!MIC || !Doc.Root.IsValid()) { return; }
+        const HL2VMT::FBlock& Body = *Doc.Root;
+
+#if WITH_EDITOR
         auto SetTexParam = [&](const TCHAR* ParamName, const FString& VmtKey, bool bIsNormal)
         {
             FString TexKey;
@@ -539,6 +700,26 @@ namespace HL2Mat
         // green channel = blend softness. Master mat is expected to multiply/clamp
         // VertexColor.A by this texture before doing the BaseColor<->BaseColor2 lerp.
         SetTexParam(TEXT("BlendModulate"), TEXT("$blendmodulatetexture"), /*bIsNormal*/ false);
+
+        // Source normal maps frequently pack a phong / envmap / specular mask into
+        // the alpha channel of `$bumpmap` / `$bumpmap2`. UE normal maps drop alpha
+        // (TC_Normalmap is BC5 RG) so we emit a sibling `_a` UTexture2D and bind
+        // it as a separate parameter when the source VTF carries non-uniform
+        // alpha. Master materials route this into the phong/envmap mask path
+        // (`$basemapalphaphongmask 0` and `$normalmapalphaenvmapmask 1` are the
+        // most common Source toggles that pivot the mask source between
+        // BaseColor.a and Normal.a).
+        auto SetNormalAlphaParam = [&](const TCHAR* ParamName, const FString& VmtKey)
+        {
+            FString TexKey;
+            if (!Body.GetString(VmtKey, TexKey) || TexKey.IsEmpty()) { return; }
+            if (UTexture2D* Tex = GetOrCreateNormalAlphaSibling(TexKey))
+            {
+                MIC->SetTextureParameterValueEditorOnly(FMaterialParameterInfo(ParamName), Tex);
+            }
+        };
+        SetNormalAlphaParam(TEXT("NormalAlpha"),  TEXT("$bumpmap"));
+        SetNormalAlphaParam(TEXT("Normal2Alpha"), TEXT("$bumpmap2"));
 
         if (bAlphaTest)
         {
@@ -640,27 +821,5 @@ namespace HL2Mat
             SetScalar(TEXT("DetailBlendFactor"), FCString::Atof(**DBF));
         }
 #endif
-
-        MIC->PostEditChange();
-        FAssetRegistryModule::AssetCreated(MIC);
-        Pkg->MarkPackageDirty();
-
-        MaterialCache.Add(Key, MIC);
-        ++NumMaterialsCreated;
-
-        // Phase 11b shader-family histogram. Bumped per *created* MIC (not per cached
-        // hit) so the totals reflect distinct material shapes in the map.
-        switch (ClassifyShader(Doc.ShaderLower, bAlphaTest, bTranslucent))
-        {
-        case EShaderFamily::Lit:                   ++NumShader_Lit;       break;
-        case EShaderFamily::LitMasked:             ++NumShader_LitMasked; break;
-        case EShaderFamily::LitTranslucent:        ++NumShader_LitTrans;  break;
-        case EShaderFamily::Decal:                 ++NumShader_Decal;     break;
-        case EShaderFamily::WorldVertexTransition: ++NumShader_Wvt;       break;
-        case EShaderFamily::VertexLit:             ++NumShader_VertexLit; break;
-        case EShaderFamily::Unlit:                 ++NumShader_Unlit;     break;
-        default:                                   ++NumShader_Other;     break;
-        }
-        return MIC;
     }
 }

@@ -86,10 +86,40 @@ namespace HL2VTF
         TArray<uint8>& OutPixels,
         FString& OutError);
 
+    // Decode mip 0, frame 0, slice 0 of an arbitrary face into BGRA8 pixels.
+    // For non-envmap textures FaceIndex must be 0 (equivalent to DecodeBGRA).
+    // For envmap (cubemap) textures, FaceIndex 0..5 selects +X, -X, +Y, -Y,
+    // +Z, -Z respectively; on v7.0–7.4 envmaps a 7th spheremap face is
+    // present but accessing it is not officially supported by the engine.
+    HL2BSPIMPORTER_API bool DecodeBGRAFace(
+        const TArray<uint8>& File,
+        const FInfo& Info,
+        int32 FaceIndex,
+        TArray<uint8>& OutPixels,
+        FString& OutError);
+
     // Convenience: load file + header + decode in one shot.
     HL2BSPIMPORTER_API bool LoadAndDecode(
         const FString& AbsPath,
         FInfo& OutInfo,
         TArray<uint8>& OutBGRA,
         FString& OutError);
+
+    // Inspect an already-decoded BGRA8 buffer and return true iff its alpha
+    // channel carries non-uniform data — i.e. min(A) and max(A) differ by more
+    // than `Tolerance` (default 4 of 255). Source-engine normal maps frequently
+    // pack a phong / envmap / specular mask into the alpha channel that UE's
+    // normal-map texture path drops; callers can use this gate to decide
+    // whether to emit a sibling alpha texture.
+    HL2BSPIMPORTER_API bool HasMeaningfulAlpha(
+        const TArray<uint8>& BGRA,
+        uint8 Tolerance = 4);
+
+    // Build a sibling BGRA8 buffer where B=G=R=alpha_in and A=255, suitable
+    // for round-tripping through `UTexture2D::Source.Init(..., TSF_BGRA8, ...)`
+    // as a single-channel mask texture. OutBGRA.Num() == BGRA.Num() on success.
+    // Returns false on a malformed (non-multiple-of-4) input.
+    HL2BSPIMPORTER_API bool ExtractAlphaToBGRA(
+        const TArray<uint8>& BGRA,
+        TArray<uint8>& OutBGRA);
 }

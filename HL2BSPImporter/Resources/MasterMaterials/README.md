@@ -26,6 +26,8 @@ only when the `.vmt` carries the corresponding key.
 | `BaseColor2`    | Texture | `$basetexture2`                | sRGB · WorldVertexTransition |
 | `Normal`        | Texture | `$bumpmap`                     | `TC_Normalmap`, sRGB=false |
 | `Normal2`       | Texture | `$bumpmap2`                    | `TC_Normalmap`, sRGB=false · WorldVertexTransition |
+| `NormalAlpha`   | Texture | `$bumpmap` (alpha channel)     | Sibling `<basename>_a` `TC_Grayscale` mask, sRGB=false. Bound only when source VTF carries non-uniform alpha. Master should route through `$normalmapalphaenvmapmask` / `$basemapalphaphongmask` semantics — typically the phong/envmap specular mask. |
+| `Normal2Alpha`  | Texture | `$bumpmap2` (alpha channel)    | Sibling `<basename>_a` `TC_Grayscale` mask, sRGB=false. WorldVertexTransition counterpart of `NormalAlpha`. |
 | `Detail`        | Texture | `$detail`                      | |
 | `BlendModulate` | Texture | `$blendmodulatetexture`        | R = blend midpoint, G = blend softness |
 | `AlphaTestRef`  | Scalar  | `$alphatestreference`          | default 0.5 |

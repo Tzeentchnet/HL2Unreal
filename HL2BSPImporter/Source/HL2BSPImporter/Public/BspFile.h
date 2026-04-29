@@ -27,6 +27,12 @@ namespace EHL2SurfFlag
         // Bitmask of flags that mean "do not render this face as solid geometry"
         SkipRenderMask =
             NoDraw | Sky | Sky2D | Trigger | Hint | Skip,
+
+        // Subset of SkipRenderMask that identifies sky faces specifically.
+        // Phase A1 captures these face names before the SkipRenderMask filter
+        // drops them so the skybox cubemap converter can emit a UTextureCube
+        // for each unique skybox referenced by the map.
+        SkyMask = Sky | Sky2D,
     };
 }
 
@@ -105,6 +111,22 @@ public:
     const TArray<FBspBrushModel>& GetBrushModels() const { return BrushModels; }
     const TArray<FBspStaticProp>& GetStaticProps() const { return StaticProps; }
 
+    // Phase A1: deduplicated set of materials/skybox/<base> stems referenced by
+    // SURF_SKY / SURF_SKY2D faces. The skybox converter looks up the six face
+    // VMTs (<base>{bk,ft,lf,rt,up,dn}.vmt) under SourceContentRoots and emits
+    // one UTextureCube per stem.
+    const TSet<FString>& GetSkyTextureNames() const { return SkyTextureNames; }
+
+    // Phase A5: raw bytes of LUMP_VISIBILITY (4). Empty when the BSP has no
+    // visibility data (rare). The runtime UHL2VBSPInfo asset decompresses
+    // per-leaf PVS bitmaps from this blob on demand.
+    const TArray<uint8>& GetVisibilityBytes() const { return VisibilityBytes; }
+
+    // Phase A5: per-leaf bounds extracted from LUMP_LEAFS (10), in raw Source
+    // coordinates (BSP units, no Y-flip). The factory converts to Unreal cm
+    // when emitting the UHL2VBSPInfo asset.
+    const TArray<FBox>& GetLeafBounds() const { return LeafBounds; }
+
     // Raw bytes of LUMP_PAKFILE (40), already decompressed if the lump used LZMA.
     // Empty when the BSP carries no embedded pakfile. Format is a standard PKZIP archive.
     const TArray<uint8>& GetPakfileBytes() const { return PakfileBytes; }
@@ -124,6 +146,9 @@ private:
     TArray<FBspBrushModel> BrushModels;
     TArray<FBspStaticProp> StaticProps;
     TArray<uint8>          PakfileBytes;
+    TSet<FString>          SkyTextureNames;     // Phase A1
+    TArray<uint8>          VisibilityBytes;     // Phase A5
+    TArray<FBox>           LeafBounds;          // Phase A5
 
     int32 Version        = 0;
     int32 WorldFirstFace = 0;

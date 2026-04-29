@@ -5,8 +5,11 @@
 #include "HL2BSPImporterSettings.h"
 #include "HL2MaterialBuilder.h"
 #include "HL2PakFile.h"
+#include "HL2SkyboxConverter.h"
 #include "HL2StudioLoader.h"
 #include "HL2StaticPropMeshBuilder.h"
+#include "HL2SurfacePropBuilder.h"
+#include "HL2VBSPInfo.h"
 #include "Engine/StaticMesh.h"
 #include "MeshDescription.h"
 #include "StaticMeshAttributes.h"
@@ -20,6 +23,7 @@
 #include "Misc/Paths.h"
 #include "Interfaces/IPluginManager.h"
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "EditorFramework/AssetImportData.h"
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonSerializer.h"
 #include "Misc/PackageName.h"
@@ -177,6 +181,38 @@ namespace
             if (D < BestDist) { BestDist = D; BestIdx = i; }
         }
         return BestIdx;
+    }
+
+    // Phase A2: derive a MinLightmapResolution value from a mesh's surface
+    // area (in cm²) using a per-cm texel density. Result is rounded to the
+    // next power of two and clamped to the user-configured range.
+    int32 ComputeLightmapResolution(double TotalAreaCm2, const UHL2BSPImporterSettings* Sets, int32 LegacyDefault)
+    {
+        if (!Sets || !Sets->bLightmapResolutionFromArea) { return LegacyDefault; }
+        if (!FMath::IsFinite(TotalAreaCm2) || TotalAreaCm2 <= 0.0) { return Sets->MinLightmapResolutionClamp; }
+        const double EdgeTexels = FMath::Sqrt(TotalAreaCm2) * static_cast<double>(Sets->LightmapTexelDensity);
+        int32 Resolution = FMath::CeilToInt(EdgeTexels);
+        Resolution = FMath::RoundUpToPowerOfTwo(FMath::Max(1, Resolution));
+        return FMath::Clamp(Resolution, Sets->MinLightmapResolutionClamp, Sets->MaxLightmapResolutionClamp);
+    }
+
+    // Sum signed triangle areas in cm² for a finished FMeshDescription.
+    // Vertex positions are already in Unreal cm (post-TransformPos).
+    double ComputeMeshSurfaceAreaCm2(const FMeshDescription& MD)
+    {
+        const FStaticMeshConstAttributes Attrs(MD);
+        TVertexAttributesConstRef<FVector3f> Positions = Attrs.GetVertexPositions();
+        double Area = 0.0;
+        for (const FTriangleID Tri : MD.Triangles().GetElementIDs())
+        {
+            const TArrayView<const FVertexInstanceID> ViIds = MD.GetTriangleVertexInstances(Tri);
+            if (ViIds.Num() != 3) { continue; }
+            const FVector A((FVector)Positions[MD.GetVertexInstanceVertex(ViIds[0])]);
+            const FVector B((FVector)Positions[MD.GetVertexInstanceVertex(ViIds[1])]);
+            const FVector C((FVector)Positions[MD.GetVertexInstanceVertex(ViIds[2])]);
+            Area += 0.5 * FVector::CrossProduct(B - A, C - A).Size();
+        }
+        return Area;
     }
 
     struct FBuildResult
@@ -679,6 +715,80 @@ bool UHL2BSPImporterFactory::FactoryCanImport(const FString& Filename)
     return Filename.EndsWith(TEXT(".bsp"), ESearchCase::IgnoreCase);
 }
 
+bool UHL2BSPImporterFactory::CanReimport(UObject* Obj, TArray<FString>& OutFilenames)
+{
+    UStaticMesh* Mesh = Cast<UStaticMesh>(Obj);
+    if (!Mesh || !Mesh->AssetImportData)
+    {
+        return false;
+    }
+
+    const TArray<FString> Filenames = Mesh->AssetImportData->ExtractFilenames();
+    for (const FString& SourceFile : Filenames)
+    {
+        if (FactoryCanImport(SourceFile))
+        {
+            OutFilenames.Add(SourceFile);
+        }
+    }
+    return OutFilenames.Num() > 0;
+}
+
+void UHL2BSPImporterFactory::SetReimportPaths(UObject* Obj, const TArray<FString>& NewReimportPaths)
+{
+    UStaticMesh* Mesh = Cast<UStaticMesh>(Obj);
+    if (Mesh && Mesh->AssetImportData && ensure(NewReimportPaths.Num() == 1))
+    {
+        Mesh->AssetImportData->UpdateFilenameOnly(NewReimportPaths[0]);
+    }
+}
+
+EReimportResult::Type UHL2BSPImporterFactory::Reimport(UObject* Obj)
+{
+    UStaticMesh* Mesh = Cast<UStaticMesh>(Obj);
+    if (!Mesh || !Mesh->AssetImportData)
+    {
+        return EReimportResult::Failed;
+    }
+
+    const FString SourceFile = Mesh->AssetImportData->GetFirstFilename();
+    if (SourceFile.IsEmpty() || IFileManager::Get().FileSize(*SourceFile) == INDEX_NONE)
+    {
+        UE_LOG(LogHL2BSPImporter, Warning, TEXT("Cannot reimport BSP: source file is missing for %s"), *GetNameSafe(Mesh));
+        return EReimportResult::Failed;
+    }
+
+    bool bOutCanceled = false;
+    UObject* Imported = ImportObject(
+        Mesh->GetClass(),
+        Mesh->GetOuter(),
+        *Mesh->GetName(),
+        RF_Public | RF_Standalone | RF_Transactional,
+        SourceFile,
+        nullptr,
+        bOutCanceled);
+
+    if (Imported)
+    {
+        if (UStaticMesh* ReimportedMesh = Cast<UStaticMesh>(Imported))
+        {
+            if (!ReimportedMesh->AssetImportData)
+            {
+                ReimportedMesh->AssetImportData = NewObject<UAssetImportData>(ReimportedMesh);
+            }
+            ReimportedMesh->AssetImportData->Update(SourceFile);
+            ReimportedMesh->MarkPackageDirty();
+        }
+        return EReimportResult::Succeeded;
+    }
+    return bOutCanceled ? EReimportResult::Cancelled : EReimportResult::Failed;
+}
+
+int32 UHL2BSPImporterFactory::GetPriority() const
+{
+    return ImportPriority;
+}
+
 UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass* InClass, UObject* InParent, FName InName,
                                                    EObjectFlags Flags, const FString& Filename, const TCHAR* /*Parms*/,
                                                    FFeedbackContext* Warn, bool& bOutOperationCanceled)
@@ -747,6 +857,142 @@ UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass* InClass, UObject* InP
         }
     }
 
+    // Build the search-root list shared by skybox conversion (A1), surfaceprop
+    // import (A3), and any other per-import file lookup. Pakfile extract dir
+    // first (per-map shipped assets shadow project-wide content), then the
+    // user-configured roots.
+    TArray<FString> SearchRoots;
+    if (!PakExtractDir.IsEmpty()) { SearchRoots.Add(FPaths::ConvertRelativePathToFull(PakExtractDir)); }
+    if (Sets)
+    {
+        for (const FString& R : Sets->SourceContentRoots)
+        {
+            if (!R.IsEmpty()) { SearchRoots.Add(FPaths::ConvertRelativePathToFull(R)); }
+        }
+    }
+
+    // ---------- Phase A1: skybox cubemap conversion ----------
+    if (Sets && Sets->bConvertSkyboxes && Sets->bSynthesizeMaterials && !Sets->SynthesizedAssetRoot.IsEmpty())
+    {
+        // The canonical Source skybox name lives on worldspawn's `skyname`
+        // keyvalue (HL2 sky faces use a placeholder material like
+        // `tools/toolsskybox` and rely on the engine to look up the per-map
+        // skyname at draw time). Fall back to deriving the base from any sky
+        // face texture names captured by FBspFile (covers custom maps that
+        // bypass the convention by referencing skybox/*.vmt directly).
+        TSet<FString> SkyBases;
+        for (const FHL2Entity& Ent : Bsp.GetEntities())
+        {
+            if (Ent.Class.Equals(TEXT("worldspawn"), ESearchCase::IgnoreCase))
+            {
+                if (const FString* SkyName = Ent.KeyValues.Find(TEXT("skyname")))
+                {
+                    FString Trimmed = *SkyName; Trimmed.TrimStartAndEndInline();
+                    if (!Trimmed.IsEmpty()) { SkyBases.Add(MoveTemp(Trimmed)); }
+                }
+                break; // only one worldspawn per map
+            }
+        }
+        for (const FString& SkyTex : Bsp.GetSkyTextureNames())
+        {
+            const FString Base = HL2Sky::DeriveBaseName(SkyTex);
+            if (!Base.IsEmpty() && Base != SkyTex) // require an actual suffix strip
+            {
+                SkyBases.Add(Base);
+            }
+        }
+
+        int32 SkyCreated = 0, SkyCached = 0, SkyFailed = 0;
+        for (const FString& Base : SkyBases)
+        {
+            HL2Sky::FConvertParams P;
+            P.BaseName        = Base;
+            P.MaterialsRoots  = SearchRoots;
+            P.DestPackagePath = Sets->SynthesizedAssetRoot / TEXT("Skies");
+            HL2Sky::EConvertResult Result;
+            FString Err;
+            UTextureCube* Cube = HL2Sky::ConvertSkybox(P, Result, Err);
+            if (Cube)
+            {
+                if (Result == HL2Sky::EConvertResult::Cached) { ++SkyCached; }
+                else                                          { ++SkyCreated; }
+            }
+            else
+            {
+                ++SkyFailed;
+            }
+        }
+        UE_LOG(LogHL2BSPImporter, Log,
+            TEXT("Skyboxes: %d created, %d cached, %d failed (from %d unique base names)"),
+            SkyCreated, SkyCached, SkyFailed, SkyBases.Num());
+    }
+
+    // ---------- Phase A3: surface properties ----------
+    if (Sets && Sets->bImportSurfaceProperties && !Sets->SynthesizedAssetRoot.IsEmpty())
+    {
+        // Locate scripts/surfaceproperties.txt under any search root. First hit wins.
+        FString ScriptAbsPath;
+        for (const FString& Root : SearchRoots)
+        {
+            FString Cand = FPaths::Combine(Root, TEXT("scripts/surfaceproperties.txt"));
+            FPaths::NormalizeFilename(Cand);
+            if (FPaths::FileExists(Cand)) { ScriptAbsPath = MoveTemp(Cand); break; }
+        }
+        if (!ScriptAbsPath.IsEmpty())
+        {
+            const FString DestPkg = Sets->SynthesizedAssetRoot / TEXT("SurfaceProps");
+            FString Err;
+            HL2SP::FBuildResult SpRes = HL2SP::BuildAllFromScript(ScriptAbsPath, DestPkg, Err);
+            UE_LOG(LogHL2BSPImporter, Log,
+                TEXT("Surface props: %d created, %d cached, %d failed (script: %s)"),
+                SpRes.NumCreated, SpRes.NumCached, SpRes.NumFailed, *ScriptAbsPath);
+        }
+        else
+        {
+            UE_LOG(LogHL2BSPImporter, Verbose, TEXT("No scripts/surfaceproperties.txt found under any SearchRoot; skipping surfaceprops."));
+        }
+    }
+
+    // ---------- Phase A5: optional VBSPInfo runtime asset ----------
+    if (Sets && Sets->bExportVBSPInfoAsset && InParent)
+    {
+        const TArray<uint8>& VisBytes = Bsp.GetVisibilityBytes();
+        const TArray<FBox>&  RawLeafs = Bsp.GetLeafBounds();
+        if (VisBytes.Num() > 0 || RawLeafs.Num() > 0)
+        {
+            const FString ParentLongPath = FPackageName::GetLongPackagePath(InParent->GetPathName());
+            const FString BaseName       = InParent->GetName();
+            const FString VbspShort      = BaseName + TEXT("_VBSPInfo");
+            const FString VbspPkgName    = ParentLongPath / VbspShort;
+            UPackage* VbspPkg = CreatePackage(*VbspPkgName);
+            if (VbspPkg)
+            {
+                VbspPkg->FullyLoad();
+                UHL2VBSPInfo* Asset = NewObject<UHL2VBSPInfo>(VbspPkg, FName(*VbspShort),
+                    RF_Public | RF_Standalone | RF_Transactional);
+                if (Asset)
+                {
+                    Asset->VisibilityBytes = VisBytes;
+                    // Transform per-leaf bounds (raw Source coords, BSP units) into Unreal cm.
+                    Asset->LeafBounds.Reserve(RawLeafs.Num());
+                    for (const FBox& Raw : RawLeafs)
+                    {
+                        FBox B(EForceInit::ForceInit);
+                        B += TransformPos(Raw.Min, Sets);
+                        B += TransformPos(Raw.Max, Sets);
+                        Asset->LeafBounds.Add(B);
+                    }
+                    Asset->PostEditChange();
+                    FAssetRegistryModule::AssetCreated(Asset);
+                    VbspPkg->MarkPackageDirty();
+                    UE_LOG(LogHL2BSPImporter, Log,
+                        TEXT("VBSPInfo: %d visibility bytes, %d leafs (%s)"),
+                        Asset->VisibilityBytes.Num(), Asset->LeafBounds.Num(), *VbspPkgName);
+                }
+            }
+        }
+    }
+
     SlowTask.EnterProgressFrame(1.f, LOCTEXT("ImportBSP_Mesh", "Building mesh description..."));
     FBuildResult Built = BuildMeshDescriptionFromBSP(
         Bsp, Sets,
@@ -785,7 +1031,9 @@ UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass* InClass, UObject* InP
         SM.BuildSettings.bGenerateLightmapUVs = true;
         SM.BuildSettings.SrcLightmapIndex     = 1;
         SM.BuildSettings.DstLightmapIndex     = 1;
-        SM.BuildSettings.MinLightmapResolution = 128;
+        const int32 LightmapRes = ComputeLightmapResolution(
+            ComputeMeshSurfaceAreaCm2(In.MeshDesc), Sets, /*LegacyDefault=*/128);
+        SM.BuildSettings.MinLightmapResolution = LightmapRes;
 
         FStaticMeshOperations::ComputeTangentsAndNormals(
             In.MeshDesc,
@@ -807,7 +1055,7 @@ UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass* InClass, UObject* InP
         }
 
         M->SetLightMapCoordinateIndex(1);
-        M->SetLightMapResolution(128);
+        M->SetLightMapResolution(LightmapRes);
 
         // Material slot list.
         TArray<FStaticMaterial> StaticMats;
@@ -858,6 +1106,12 @@ UObject* UHL2BSPImporterFactory::FactoryCreateFile(UClass* InClass, UObject* InP
     }
     UE_LOG(LogHL2BSPImporter, Log, TEXT("Worldspawn StaticMesh built. LODs=%d Materials=%d"),
         Mesh->GetNumLODs(), Mesh->GetStaticMaterials().Num());
+    if (!Mesh->AssetImportData)
+    {
+        Mesh->AssetImportData = NewObject<UAssetImportData>(Mesh);
+    }
+    Mesh->AssetImportData->Update(Filename);
+    Mesh->MarkPackageDirty();
 
     // ---------- Brush sub-models (func_door, func_brush, water, etc.) ----------
     // Resolve model index → entity index (first match wins). Brush entities reference

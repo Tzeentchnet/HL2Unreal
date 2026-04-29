@@ -25,9 +25,9 @@ For a given `mapname.bsp`, the importer:
    - Synthesized `UMaterialInstanceConstant` parented to a project-supplied master material, generated from the corresponding `.vmt` and `.vtf` files.
    - Engine default surface material as a final fallback.
 7. Builds each `UStaticMesh` via the editor source-model path (so Nanite settings, MikkTSpace tangents, and auto-lightmap UV generation actually take effect), and optionally adds Complex-As-Simple collision.
-8. Walks the entity lump and emits `<Map>_Entities` (a `UDataTable` of `FHL2Entity` rows). Source I/O `On*` outputs are preserved as a `TArray<FHL2EntityIO>` per row instead of being collapsed by the per-entity keyvalue map.
+8. Walks the entity lump and emits `<Map>_Entities` (a `UDataTable` of `FHL2Entity` rows). Source I/O `On*` outputs are preserved as a `TArray<FHL2EntityIO>` per row instead of being collapsed by the per-entity keyvalue map; remaining non-structured keyvalues are retained on each row for editor utilities.
 9. Walks the `sprp` GameLump and emits `<Map>_StaticProps` (a `UDataTable` of `FHL2StaticProp` rows) carrying per-instance origin / rotation / scale / skin / model in Unreal coordinates.
-10. *(Optional, gated by `bImportStaticPropMeshes`)* Synthesises one `UStaticMesh` per unique `(model, skin, body)` referenced by the static-prop instance table or by `prop_*` point-entity rows, by parsing the corresponding `.mdl / .vvd / .dx90.vtx` triple. Each `FHL2StaticProp::StaticMeshAsset` and `FHL2Entity::PropMesh` is back-assigned to the produced asset.
+10. *(Optional, gated by `bImportStaticPropMeshes`)* Synthesises one `UStaticMesh` per unique `(model, skin, body)` referenced by the static-prop instance table or by `prop_*` point-entity rows, by parsing the corresponding `.mdl / .vvd / .dx90.vtx` triple (`.vtx` and `.dx80.vtx` are fallback vertex-index names). Each `FHL2StaticProp::StaticMeshAsset` and `FHL2Entity::PropMesh` is back-assigned to the produced asset.
 
 What it deliberately does **not** do (yet) is listed under [Limitations](#limitations).
 
@@ -52,6 +52,8 @@ The module is gated to Editor builds via `WhitelistTargets` in the `.uplugin`, s
    - `<MapName>_Entities` — `UDataTable<FHL2Entity>` (only when the map has entities).
    - `<MapName>_StaticProps` — `UDataTable<FHL2StaticProp>` (only when the `sprp` GameLump has any entries).
 3. Material synthesis is on by default but requires either (a) the in-plugin master materials to be authored — see [Master materials](#master-materials) — or (b) project-supplied parents pointed at via the settings. Until parents resolve, every face will use the engine default surface material.
+4. To materialise the imported tables into level actors, call `UHL2LevelSpawnLibrary::SpawnImportedActors` from an Editor Utility Blueprint / Widget and pass the generated `_Entities` and `_StaticProps` tables. The helper spawns brush meshes, entity-prop meshes, static props, and optional basic light actors into editor folders under `HL2Imported`.
+5. Imported worldspawn meshes store their `.bsp` source path, so Content Browser right-click → **Reimport** reruns the factory against the original file.
 
 ---
 
@@ -85,7 +87,7 @@ The module is gated to Editor builds via `WhitelistTargets` in the `.uplugin`, s
 | Setting                     | Default | Notes |
 |-----------------------------|---------|-------|
 | `bImportPropsAsInstances`   | `false` | Reserved — direct ISM/HISM emission for `prop_static` is not implemented yet (planned to be subsumed by the Phase 13 PCG point-data path). The instance table is always emitted as a DataTable regardless. |
-| `bImportStaticPropMeshes`   | `false` | When `true` (and `bSynthesizeMaterials` is on), synthesise one `UStaticMesh` per unique `(model, skin, body)` referenced by the `sprp` instance table or by `prop_*` entity rows. Requires `SourceContentRoots` to point at directories where the `.mdl/.vvd/.dx90.vtx` triples can be located. Default off until validated against more community maps; per-model failures leave the row's mesh field empty. |
+| `bImportStaticPropMeshes`   | `false` | When `true` (and `bSynthesizeMaterials` is on), synthesise one `UStaticMesh` per unique `(model, skin, body)` referenced by the `sprp` instance table or by `prop_*` entity rows. Requires `SourceContentRoots` to point at directories where the `.mdl/.vvd/.dx90.vtx` triples can be located (`.vtx` and `.dx80.vtx` are tried as fallbacks). Default off until validated against more community maps; per-model failures leave the row's mesh field empty. |
 
 ### Materials — explicit override map
 
@@ -155,7 +157,7 @@ For `mapname.bsp` imported into `/Game/HL2/Maps/`:
 
 Row contracts:
 
-- `FHL2Entity` exposes `Name` (`targetname`), `Class`, `Origin`, `Rotation`, `Model`, `Skin`, `BodyGroup`, `BrushMesh` (`FSoftObjectPath` for brush sub-meshes), `PropMesh` (`FSoftObjectPath` for synthesised prop meshes), and `Outputs` (`TArray<FHL2EntityIO>` carrying parsed Source I/O connections — one row per `On*` keyvalue, split on the modern ESC (`0x1B`) or HL2-era comma separator). All fields are `EditAnywhere / BlueprintReadWrite`.
+- `FHL2Entity` exposes `Name` (`targetname`), `Class`, `Origin`, `Rotation`, `Model`, `Skin`, `BodyGroup`, `BrushMesh` (`FSoftObjectPath` for brush sub-meshes), `PropMesh` (`FSoftObjectPath` for synthesised prop meshes), `Outputs` (`TArray<FHL2EntityIO>` carrying parsed Source I/O connections — one row per `On*` keyvalue, split on the modern ESC (`0x1B`) or HL2-era comma separator), and `KeyValues` (remaining non-structured entity keyvalues, last-wins for duplicate non-output keys). All fields are `EditAnywhere / BlueprintReadWrite`.
 - `FHL2EntityIO` exposes `OutputName`, `TargetName`, `InputName`, `Parameter`, `Delay`, `TimesToFire` (-1 = infinite).
 - `FHL2StaticProp` exposes `ModelName`, `Origin`, `Rotation`, `UniformScale`, `Skin`, `Solid`, and `StaticMeshAsset` (populated when `bImportStaticPropMeshes` resolves the model). Origin / Rotation are stored in **Unreal coordinates** so a Blueprint can spawn `AStaticMeshActor`s straight from the table.
 
@@ -208,6 +210,7 @@ Sources:
 
 For each unique key:
   1. Resolve <root>/<model>.mdl + .vvd + .dx90.vtx under content roots
+     (falling back to .vtx, then .dx80.vtx)
      (pakfile extract dir first, then SourceContentRoots in order).
   2. Cross-validate studio checksum / bodypart count / per-model mesh count.
   3. Walk LOD 0:
@@ -224,6 +227,22 @@ For each unique key:
 ```
 
 Re-imports re-use existing per-key assets at the destination path instead of overwriting them.
+
+---
+
+## Spawning actors from tables
+
+The importer remains asset-first: a BSP import produces meshes and DataTables, then `UHL2LevelSpawnLibrary::SpawnImportedActors` can place those rows into the active editor world when you want a concrete level layout.
+
+`FHL2LevelSpawnOptions` controls which row families are spawned:
+
+- `bSpawnStaticProps` — reads `_StaticProps` rows whose `StaticMeshAsset` resolved during the prop synthesis pass.
+- `bSpawnBrushEntities` — reads `_Entities` rows whose `BrushMesh` points at a generated `_BModel_<N>` mesh.
+- `bSpawnEntityProps` — reads `_Entities` rows whose `PropMesh` points at a synthesized point-entity prop mesh.
+- `bSpawnBasicLights` — optionally creates `PointLight`, `SpotLight`, or `DirectionalLight` actors for `light`, `light_spot`, and `light_environment` rows, applying `_light` / `_lightHDR` colour and brightness when those keyvalues are present. This is still a lightweight placement pass, not a full Source lighting conversion with attenuation, styles, or MegaLights tuning.
+- `FolderRoot` / `bSelectSpawnedActors` — controls editor organisation and selection after spawn.
+
+The returned `FHL2LevelSpawnResult` reports spawned counts for static props, brush entities, entity props, lights, skipped rows, and the actor list. The operation is wrapped in a single editor transaction, so Undo removes the spawned actors.
 
 ---
 
@@ -255,10 +274,10 @@ Out of scope for the current code, in roughly the order they're likely to be tac
 - **`func_water` → UE5 Water plugin** mapping and `$envmap` per-leaf cubemap baking from `LUMP_CUBEMAPS` (Phase 11c investigations — only `EnvmapTint` is bound today; `Cubemap` falls back to the master-material default).
 - **Animated VMT proxies** (`Proxies { TextureScroll, Pulse, … }`) as runtime-dynamic parameters.
 - **HDR lightmap baking, light-style data, 3D skybox composition.**
-- **`FReimportHandler` + Interchange refactor** — re-import currently creates a fresh asset set rather than updating in place.
+- **Interchange / partial reimport refactor** — worldspawn `UStaticMesh` assets now support right-click → Reimport through `FReimportHandler`, but there is no Interchange translator yet, no per-import parameter override UI, and no partial mode for only rebuilding materials, tables, or generated sibling assets.
 - **v21+ BSPs (CS:GO / L4D2 / Workshop)** — rejected at the version gate; v21 changes several lump struct sizes and bumps `dface_t`. Static-prop versions beyond v11 (CS:GO ships v10/v11; L4D2 ships v7/v10) similarly need a branch table.
 - **Big-endian (Xbox 360 / PS3) BSPs** — `'PSBV'` magic is currently rejected with a clear error; would require byteswapping every header / lump-struct field on read.
-- **"Import as level" pass** — brush sub-meshes and prop meshes ship as DataTable rows + asset references; spawning `AStaticMeshActor`s into a `UWorld` is currently the user's job (a Blueprint or editor utility). The Phase 13 World Partition + One-File-Per-Actor route is tracked in [ROADMAP.md](ROADMAP.md).
+- **Full World Partition / One-File-Per-Actor level import** — `UHL2LevelSpawnLibrary::SpawnImportedActors` can materialise the current DataTables into actors, but it does not yet create a dedicated `UWorld`, Data Layers, OFPA assets, HLOD layers, calibrated Source lighting, or runtime Source I/O behaviour. The larger Phase 13 route is tracked in [ROADMAP.md](ROADMAP.md).
 
 ---
 
@@ -276,7 +295,7 @@ Out of scope for the current code, in roughly the order they're likely to be tac
 
 **Brush entities are present in `_Entities` but no `_BModel_*` assets were created** — entities without a `model "*N"` keyvalue have no brush geometry by design (point entities, lights, logic nodes). Check the `Brush sub-models:` log line: `declared=N` is the number of `LUMP_MODELS` entries past worldspawn, `meshes-built=M` is the number that had renderable faces after surf-flag filtering.
 
-**Static-prop instances are in `_StaticProps` but `StaticMeshAsset` is empty on every row** — `bImportStaticPropMeshes` is off (default), or it's on but the `.mdl/.vvd/.dx90.vtx` triples can't be located under `SourceContentRoots` / the pakfile. Check the `Static prop meshes:` line — `failed=N` with `built=0` means lookups never succeeded; `built=0 cached=N` means the destination assets already existed from a prior import.
+**Static-prop instances are in `_StaticProps` but `StaticMeshAsset` is empty on every row** — `bImportStaticPropMeshes` is off (default), or it's on but the `.mdl/.vvd/.dx90.vtx` triples can't be located under `SourceContentRoots` / the pakfile (`.vtx` and `.dx80.vtx` are fallback names). Check the `Static prop meshes:` line — `failed=N` with `built=0` means lookups never succeeded; `built=0 cached=N` means the destination assets already existed from a prior import.
 
 **Faces appear inside-out** — should not happen with current code (winding is reversed automatically), but if you've forked the coordinate transform, recheck `ShouldReverseWinding`.
 
@@ -307,6 +326,7 @@ HL2BSPImporter/
    │  ├─ HL2BSPImporterFactory.h        UFactory entry point
    │  ├─ HL2BSPImporterSettings.h       UDeveloperSettings
    │  ├─ HL2BSPImporterTypes.h          shared structs (FHL2Entity, FHL2EntityIO, FHL2StaticProp)
+    │  ├─ HL2LevelSpawnLibrary.h         editor helper: DataTables → actors
    │  ├─ BspFile.h                      VBSP reader (worldspawn + brush sub-models + sprp + entities)
    │  ├─ HL2EntityTable.h               entity DataTable
    │  ├─ HL2Lzma.h                      Source LZMA lump decoder

@@ -420,6 +420,20 @@ namespace HL2VTF
 
     bool DecodeBGRA(const TArray<uint8>& File, const FInfo& I, TArray<uint8>& Out, FString& OutError)
     {
+        return DecodeBGRAFace(File, I, /*FaceIndex*/ 0, Out, OutError);
+    }
+
+    bool DecodeBGRAFace(const TArray<uint8>& File, const FInfo& I, int32 FaceIndex, TArray<uint8>& Out, FString& OutError)
+    {
+        const int32 NumFaces  = FMath::Max(1, I.NumFaces);
+        const int32 NumFrames = FMath::Max(1, I.Frames);
+        const int32 NumSlices = FMath::Max(1, I.Depth);
+        if (FaceIndex < 0 || FaceIndex >= NumFaces)
+        {
+            OutError = FString::Printf(TEXT("DecodeBGRAFace: face %d out of range [0..%d)"), FaceIndex, NumFaces);
+            return false;
+        }
+
         const int64 DataStart = LocateHighResData(File, I);
         if (DataStart < 0)
         {
@@ -429,9 +443,6 @@ namespace HL2VTF
 
         // Walk mip chain from smallest -> largest, stopping at mip 0.
         int64 Cursor = DataStart;
-        const int32 NumFaces  = FMath::Max(1, I.NumFaces);
-        const int32 NumFrames = FMath::Max(1, I.Frames);
-        const int32 NumSlices = FMath::Max(1, I.Depth);
 
         for (int32 Mip = I.NumMips - 1; Mip >= 0; --Mip)
         {
@@ -453,8 +464,16 @@ namespace HL2VTF
             }
             if (Mip == 0)
             {
-                // We want frame 0, face 0, slice 0 — that's the first FaceBytes of this region.
-                const uint8* Src = File.GetData() + Cursor;
+                // Storage order within a mip is frame -> face -> slice. We always pull
+                // frame 0, slice 0; FaceIndex selects the face stride.
+                const int64 FaceOffset = static_cast<int64>(FaceIndex) * static_cast<int64>(NumSlices) * FaceBytes;
+                if (FaceOffset < 0 || FaceOffset + FaceBytes > MipBytes)
+                {
+                    OutError = FString::Printf(TEXT("VTF face offset out of range (face=%d, faceBytes=%lld, mipBytes=%lld)"),
+                        FaceIndex, FaceBytes, MipBytes);
+                    return false;
+                }
+                const uint8* Src = File.GetData() + Cursor + FaceOffset;
                 int32 DecodedBytes = 0;
                 if (!TryDecodedBGRABytes(I.Width, I.Height, DecodedBytes))
                 {
@@ -539,5 +558,39 @@ namespace HL2VTF
         }
         if (!ReadHeader(Bytes, Info, OutError)) { return false; }
         return DecodeBGRA(Bytes, Info, OutBGRA, OutError);
+    }
+
+    bool HasMeaningfulAlpha(const TArray<uint8>& BGRA, uint8 Tolerance)
+    {
+        const int32 Num = BGRA.Num();
+        if (Num <= 0 || (Num % 4) != 0) { return false; }
+        uint8 MinA = 255, MaxA = 0;
+        const uint8* Ptr = BGRA.GetData() + 3; // alpha is the 4th byte of each BGRA quad
+        for (int32 i = 0; i < Num; i += 4, Ptr += 4)
+        {
+            const uint8 A = *Ptr;
+            if (A < MinA) { MinA = A; }
+            if (A > MaxA) { MaxA = A; }
+            if ((MaxA - MinA) > Tolerance) { return true; }
+        }
+        return (MaxA - MinA) > Tolerance;
+    }
+
+    bool ExtractAlphaToBGRA(const TArray<uint8>& BGRA, TArray<uint8>& OutBGRA)
+    {
+        const int32 Num = BGRA.Num();
+        if (Num <= 0 || (Num % 4) != 0) { return false; }
+        OutBGRA.SetNumUninitialized(Num);
+        const uint8* In = BGRA.GetData();
+        uint8* Out      = OutBGRA.GetData();
+        for (int32 i = 0; i < Num; i += 4)
+        {
+            const uint8 A = In[i + 3];
+            Out[i + 0] = A;   // B
+            Out[i + 1] = A;   // G
+            Out[i + 2] = A;   // R
+            Out[i + 3] = 255; // A (opaque)
+        }
+        return true;
     }
 }

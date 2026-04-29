@@ -44,6 +44,38 @@ namespace HL2Studio
         // matches the BSP path's ShouldReverseWinding behaviour.
         FORCEINLINE bool ShouldReverseWinding(const UHL2BSPImporterSettings*) { return true; }
 
+        // Phase A2: lightmap resolution from a finished UStaticMesh's surface
+        // area, mirroring the BSP factory's helper. We sum signed triangle
+        // areas from the FMeshDescription (post-coord-transform, so positions
+        // are already in Unreal cm).
+        double ComputeMeshAreaCm2(const FMeshDescription& MD)
+        {
+            const FStaticMeshConstAttributes Attrs(MD);
+            TVertexAttributesConstRef<FVector3f> Positions = Attrs.GetVertexPositions();
+            double Area = 0.0;
+            for (const FTriangleID Tri : MD.Triangles().GetElementIDs())
+            {
+                const TArrayView<const FVertexInstanceID> ViIds = MD.GetTriangleVertexInstances(Tri);
+                if (ViIds.Num() != 3) { continue; }
+                const FVector A((FVector)Positions[MD.GetVertexInstanceVertex(ViIds[0])]);
+                const FVector B((FVector)Positions[MD.GetVertexInstanceVertex(ViIds[1])]);
+                const FVector C((FVector)Positions[MD.GetVertexInstanceVertex(ViIds[2])]);
+                Area += 0.5 * FVector::CrossProduct(B - A, C - A).Size();
+            }
+            return Area;
+        }
+
+        int32 ComputePropLightmapResolution(const FMeshDescription& MD, const UHL2BSPImporterSettings* Sets, int32 LegacyDefault)
+        {
+            if (!Sets || !Sets->bLightmapResolutionFromArea) { return LegacyDefault; }
+            const double AreaCm2 = ComputeMeshAreaCm2(MD);
+            if (!FMath::IsFinite(AreaCm2) || AreaCm2 <= 0.0) { return Sets->MinLightmapResolutionClamp; }
+            const double EdgeTexels = FMath::Sqrt(AreaCm2) * static_cast<double>(Sets->LightmapTexelDensity);
+            int32 Resolution = FMath::CeilToInt(EdgeTexels);
+            Resolution = FMath::RoundUpToPowerOfTwo(FMath::Max(1, Resolution));
+            return FMath::Clamp(Resolution, Sets->MinLightmapResolutionClamp, Sets->MaxLightmapResolutionClamp);
+        }
+
         // Resolve a mesh's material to a UE MaterialInterface by trying every
         // candidate path the MDL provided (most-likely first per Source's
         // cdtex search order). Falls back to the engine default surface
@@ -294,7 +326,8 @@ namespace HL2Studio
         SM.BuildSettings.bGenerateLightmapUVs = true;
         SM.BuildSettings.SrcLightmapIndex     = 1;
         SM.BuildSettings.DstLightmapIndex     = 1;
-        SM.BuildSettings.MinLightmapResolution = 64;
+        const int32 PropLightmapRes = ComputePropLightmapResolution(MD, Sets, /*LegacyDefault=*/64);
+        SM.BuildSettings.MinLightmapResolution = PropLightmapRes;
 
         // Source props ship with hand-authored normals/tangents on the VVD;
         // recompute via MikkTSpace so the runtime baking matches BSP world
@@ -320,7 +353,7 @@ namespace HL2Studio
         }
 
         M->SetLightMapCoordinateIndex(1);
-        M->SetLightMapResolution(64);
+        M->SetLightMapResolution(PropLightmapRes);
 
         // Material slots — order matches SlotOrder (= polygon-group creation order).
         TArray<FStaticMaterial> StaticMats;

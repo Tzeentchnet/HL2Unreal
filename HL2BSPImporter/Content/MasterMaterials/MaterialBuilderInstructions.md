@@ -113,6 +113,17 @@ that the asset can usefully consume. Rules:
 - **Detail blend** (`DetailBlendMode`, `DetailBlendFactor`) — implement
   modes 0–2 (mod2x, additive, blend) at minimum; higher Source modes are
   rare in HL2 maps and can be stubbed to mode 0.
+- **Normal-map alpha sibling** (`NormalAlpha`, `Normal2Alpha`) — UE
+  normal-map textures (TC_Normalmap is BC5 RG) drop the alpha channel that
+  Source frequently uses for phong / envmap / specular masks. The importer
+  emits a sibling `<basename>_a` `TC_Grayscale` texture next to each
+  `$bumpmap` whose source VTF carries non-uniform alpha and binds it to
+  these parameters. Default both to a 1×1 white texture and route their
+  `R` channel into the specular / phong mask path your master implements
+  (Source's `$normalmapalphaenvmapmask` and `$basemapalphaphongmask`
+  toggles correspond, respectively, to `NormalAlpha` driving the envmap
+  mask and the parent shader picking between `BaseColor.a` and
+  `NormalAlpha` for the phong mask).
 
 ### `M_HL2_WorldVertexBlend` graph
 

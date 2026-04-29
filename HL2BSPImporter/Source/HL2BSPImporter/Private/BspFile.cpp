@@ -13,8 +13,10 @@ namespace
     constexpr int32 LUMP_PLANES                 = 1;
     constexpr int32 LUMP_TEXDATA                = 2;
     constexpr int32 LUMP_VERTEXES               = 3;
+    constexpr int32 LUMP_VISIBILITY             = 4;   // Phase A5
     constexpr int32 LUMP_TEXINFO                = 6;
     constexpr int32 LUMP_FACES                  = 7;
+    constexpr int32 LUMP_LEAFS                  = 10;  // Phase A5
     constexpr int32 LUMP_EDGES                  = 12;
     constexpr int32 LUMP_SURFEDGES              = 13;
     constexpr int32 LUMP_MODELS                 = 14;
@@ -98,6 +100,25 @@ namespace
 
     struct DDispVert { float Vector[3]; float Dist; float Alpha; };
     static_assert(sizeof(DDispVert) == 20, "ddispvert_t must be 20 bytes");
+
+    // dleaf_t header (Phase A5). The on-disk struct is 32 bytes for LumpVersion==1 and 56 bytes
+    // for LumpVersion==0 (v0 appends a CompressedLightCube[6] block). Both share the same first
+    // 30 bytes; we read mins/maxs at fixed offsets and let the per-entry stride (computed from
+    // RemainingBytes / EntryCount) skip the version-specific tail.
+    struct DLeafHeader
+    {
+        int32  Contents;            // offset  0
+        int16  Cluster;             // offset  4
+        int16  AreaFlags;           // offset  6  (area:9, flags:7 packed)
+        int16  Mins[3];             // offset  8
+        int16  Maxs[3];             // offset 14
+        uint16 FirstLeafFace;       // offset 20
+        uint16 NumLeafFaces;        // offset 22
+        uint16 FirstLeafBrush;      // offset 24
+        uint16 NumLeafBrushes;      // offset 26
+        int16  LeafWaterDataID;     // offset 28
+    };
+    static_assert(sizeof(DLeafHeader) == 30, "dleaf_t header prefix must be 30 bytes");
 
     // dgamelump_t: per-sub-lump descriptor inside LUMP_GAME_LUMP. id is a four-cc stored as int32
     // in little-endian order (e.g. 'sprp' = ('s')|('p'<<8)|('r'<<16)|('p'<<24) = 0x70727073).
@@ -284,6 +305,9 @@ bool FBspFile::LoadFromFile(const FString& Filename)
     BrushModels.Reset();
     StaticProps.Reset();
     PakfileBytes.Reset();
+    SkyTextureNames.Reset();
+    VisibilityBytes.Reset();
+    LeafBounds.Reset();
     WorldFirstFace = 0;
     WorldNumFaces  = 0;
     Version        = 0;
@@ -429,7 +453,23 @@ bool FBspFile::LoadFromFile(const FString& Filename)
                 ? static_cast<uint32>(TexInfos[DF.TexInfo].Flags)
                 : 0u;
             const bool bIsDisplacement = (DF.DispInfo >= 0);
-            if (!bIsDisplacement && (SurfFlags & EHL2SurfFlag::SkipRenderMask)) { ++SkippedNoDraw; continue; }
+            if (!bIsDisplacement && (SurfFlags & EHL2SurfFlag::SkipRenderMask))
+            {
+                ++SkippedNoDraw;
+                // Phase A1: capture sky face material names before the skip filter
+                // drops them. Sky faces reference materials/skybox/<base>{suffix}.vmt;
+                // we keep the raw texture name and let the skybox converter strip the
+                // 2-char suffix (bk/ft/lf/rt/up/dn) and look up the six face VMTs.
+                if (SurfFlags & EHL2SurfFlag::SkyMask)
+                {
+                    FString SkyName = GetTexName(DF.TexInfo);
+                    if (!SkyName.IsEmpty())
+                    {
+                        SkyTextureNames.Add(MoveTemp(SkyName));
+                    }
+                }
+                continue;
+            }
 
             if (DF.FirstEdge < 0 ||
                 static_cast<int64>(DF.FirstEdge) + DF.NumEdges > SurfEdges.Num())
@@ -588,6 +628,79 @@ bool FBspFile::LoadFromFile(const FString& Filename)
             const ANSICHAR* RawBegin = reinterpret_cast<const ANSICHAR*>(EntPtr);
             FString EntText(static_cast<int32>(EntLen), RawBegin); // FString(int32 Len, const ANSICHAR*) constructor
             ParseEntities(EntText, Entities);
+        }
+    }
+
+    // Phase A5: visibility (LUMP_VISIBILITY / 4) + per-leaf bounds (LUMP_LEAFS / 10).
+    // Both are captured raw so the optional UHL2VBSPInfo asset can decompress
+    // PVS bitmaps on demand. We don't validate the visibility byte stream here
+    // beyond bounds-checking the lump itself.
+    {
+        const FLumpInfo& LVis = H.Lumps[LUMP_VISIBILITY];
+        if (LVis.Len > 0)
+        {
+            TArray<uint8> VisDecompressed;
+            const uint8*  VisPtr = nullptr;
+            int64         VisLen = 0;
+            if (AcquireLumpBytes(Bytes, LVis, TEXT("LUMP_VISIBILITY"), VisDecompressed, VisPtr, VisLen) && VisLen > 0)
+            {
+                if (VisDecompressed.Num() > 0)
+                {
+                    VisibilityBytes = MoveTemp(VisDecompressed);
+                }
+                else
+                {
+                    VisibilityBytes.SetNumUninitialized(static_cast<int32>(VisLen));
+                    FMemory::Memcpy(VisibilityBytes.GetData(), VisPtr, VisLen);
+                }
+                UE_LOG(LogHL2BSPImporter, Verbose, TEXT("Visibility lump: %d bytes."), VisibilityBytes.Num());
+            }
+        }
+
+        const FLumpInfo& LLeafs = H.Lumps[LUMP_LEAFS];
+        if (LLeafs.Len > 0)
+        {
+            TArray<uint8> LeafDecompressed;
+            const uint8*  LeafPtr = nullptr;
+            int64         LeafLen = 0;
+            if (AcquireLumpBytes(Bytes, LLeafs, TEXT("LUMP_LEAFS"), LeafDecompressed, LeafPtr, LeafLen) && LeafLen >= static_cast<int64>(sizeof(DLeafHeader)))
+            {
+                // dleaf_t stride is version-dependent (32 bytes for LumpVersion>=1,
+                // 56 bytes for v0 with the trailing CompressedLightCube). Compute
+                // from the actual on-disk size; fall back to header-only stride.
+                const int32 LumpVersion = LLeafs.Version;
+                int32 Stride = (LumpVersion >= 1) ? 32 : 56;
+                if (LeafLen % Stride != 0)
+                {
+                    // Some maps round the v0 stride to a different alignment; try
+                    // the alternate stride before giving up.
+                    const int32 Alt = (Stride == 32) ? 56 : 32;
+                    if (LeafLen % Alt == 0) { Stride = Alt; }
+                    else
+                    {
+                        UE_LOG(LogHL2BSPImporter, Warning,
+                            TEXT("LUMP_LEAFS size %lld not divisible by stride %d (lumpVer=%d); leaf bounds skipped."),
+                            (long long)LeafLen, Stride, LumpVersion);
+                        Stride = 0;
+                    }
+                }
+                if (Stride > 0)
+                {
+                    const int32 NumLeafs = static_cast<int32>(LeafLen / Stride);
+                    LeafBounds.Reserve(NumLeafs);
+                    for (int32 i = 0; i < NumLeafs; ++i)
+                    {
+                        DLeafHeader L{};
+                        FMemory::Memcpy(&L, LeafPtr + static_cast<int64>(i) * Stride, sizeof(DLeafHeader));
+                        FBox B(EForceInit::ForceInit);
+                        B += FVector(L.Mins[0], L.Mins[1], L.Mins[2]);
+                        B += FVector(L.Maxs[0], L.Maxs[1], L.Maxs[2]);
+                        LeafBounds.Add(B);
+                    }
+                    UE_LOG(LogHL2BSPImporter, Verbose, TEXT("Leaf lump: %d leafs (lumpVer=%d, stride=%d)."),
+                        NumLeafs, LumpVersion, Stride);
+                }
+            }
         }
     }
 
@@ -918,6 +1031,7 @@ void FBspFile::ParseEntities(const FString& EntText, TArray<FHL2Entity>& Out) co
         {
             E.BodyGroup = FCString::Atoi(*Tmp);
         }
+        E.KeyValues = MoveTemp(KV);
         E.Outputs = MoveTemp(PendingOutputs);
         TotalOutputs += E.Outputs.Num();
         Out.Add(MoveTemp(E));

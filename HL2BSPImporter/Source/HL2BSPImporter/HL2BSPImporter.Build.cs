@@ -27,6 +27,7 @@ public class HL2BSPImporter : ModuleRules
             new string[] {
                 "AssetRegistry",
                 "AssetTools",
+                "DesktopPlatform",
                 "Json",
                 "JsonUtilities",
                 "MeshDescription",
@@ -35,7 +36,10 @@ public class HL2BSPImporter : ModuleRules
                 "PhysicsCore",
                 "Projects",
                 "RenderCore",
-                "RHI"
+                "RHI",
+                "Slate",
+                "SlateCore",
+                "ToolMenus"
             });
     }
 }

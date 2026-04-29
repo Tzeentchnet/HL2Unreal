@@ -60,6 +60,11 @@ struct HL2BSPIMPORTER_API FHL2Entity
     // Source I/O output connections fired by this entity. Preserves duplicate output keys so
     // a single `OnTrigger` with three downstream targets produces three rows here.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "HL2") TArray<FHL2EntityIO> Outputs;
+
+    // Remaining non-structured keyvalues from the entity lump after common fields above have
+    // been extracted. Duplicate non-output keys are still last-wins, matching Source's normal
+    // KeyValues map behaviour; duplicate `On*` outputs are preserved in Outputs instead.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "HL2") TMap<FString, FString> KeyValues;
 };
 
 USTRUCT()

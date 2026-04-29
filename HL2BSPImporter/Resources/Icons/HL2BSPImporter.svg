@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="white">
+  <!-- Half-Life lambda. Two filled polygons: long main stroke (upper-left to
+       lower-right) plus the descending branch (junction near the top, down to
+       lower-left). Single-colour white so the slate brush tint takes effect. -->
+  <polygon points="4,3 6,3 17,17 15,17"/>
+  <polygon points="7,8 9,8 5,17 3,17"/>
+</svg>

@@ -69,12 +69,57 @@ public:
     UPROPERTY(config, EditAnywhere, Category = "Materials|Synthesis|Parents", meta = (AllowedClasses = "/Script/Engine.MaterialInterface"))
     FSoftObjectPath ParentMaterial_UnlitGeneric = FSoftObjectPath(TEXT("/HL2BSPImporter/MasterMaterials/M_HL2_Unlit.M_HL2_Unlit"));
 
+    // -------- Skybox (Phase A1) --------
+    // When true, faces flagged SURF_SKY / SURF_SKY2D are dropped from the
+    // worldspawn mesh (as before) AND their material names are captured. For
+    // each unique skybox base referenced, the importer assembles the six face
+    // VTFs into one UTextureCube under <SynthesizedAssetRoot>/Skies/<base>.
+    // HDR formats (RGBA16F/16) are skipped with a warning in this phase.
+    UPROPERTY(config, EditAnywhere, Category = "Materials|Synthesis")
+    bool bConvertSkyboxes = true;
+
+    // -------- Surface properties (Phase A3) --------
+    // When true, each BSP import scans for `<SourceContentRoots>/scripts/
+    // surfaceproperties.txt` (KV1 format) and emits one USurfaceProp asset
+    // per surface entry under <SynthesizedAssetRoot>/SurfaceProps/<name>.
+    // Idempotent — re-imports reuse existing assets.
+    UPROPERTY(config, EditAnywhere, Category = "Materials|Synthesis")
+    bool bImportSurfaceProperties = true;
+
     // -------- Mesh build --------
     UPROPERTY(config, EditAnywhere, Category = "Import")
     bool bBuildNanite = true;
 
     UPROPERTY(config, EditAnywhere, Category = "Import")
     bool bImportCollision = true;
+
+    // -------- Lightmaps (Phase A2) --------
+    // When true, each built UStaticMesh's MinLightmapResolution is computed
+    // from its surface area × LightmapTexelDensity instead of the legacy
+    // hardcoded value (128 for worldspawn / 64 for props). Default-off so
+    // existing maps re-import byte-identical until calibration is validated.
+    UPROPERTY(config, EditAnywhere, Category = "Import|Lightmaps")
+    bool bLightmapResolutionFromArea = false;
+
+    // Texels per Unreal cm of mesh surface area. 0.1 ≈ Source's stock 0.25
+    // luxel/inch baseline. Calibrate against your project's Lumen / lightmap
+    // budget; raise for higher-quality bakes.
+    UPROPERTY(config, EditAnywhere, Category = "Import|Lightmaps", meta = (EditCondition = "bLightmapResolutionFromArea", ClampMin = "0.001", ClampMax = "10.0"))
+    float LightmapTexelDensity = 0.1f;
+
+    UPROPERTY(config, EditAnywhere, Category = "Import|Lightmaps", meta = (EditCondition = "bLightmapResolutionFromArea", ClampMin = "16", ClampMax = "2048"))
+    int32 MinLightmapResolutionClamp = 32;
+
+    UPROPERTY(config, EditAnywhere, Category = "Import|Lightmaps", meta = (EditCondition = "bLightmapResolutionFromArea", ClampMin = "16", ClampMax = "4096"))
+    int32 MaxLightmapResolutionClamp = 512;
+
+    // -------- Visibility (Phase A5) --------
+    // When true, emit a sibling <MapName>_VBSPInfo UDataAsset carrying the
+    // raw LUMP_VISIBILITY bytes (PVS) and per-leaf bounds. Default-off — the
+    // asset has no in-engine consumer today; flip on if integrating with a
+    // future PVS-driven culling / streaming system.
+    UPROPERTY(config, EditAnywhere, Category = "Import")
+    bool bExportVBSPInfoAsset = false;
 
     // -------- Displacements --------
     // When true, vertices on the perimeter of every displacement grid are clustered with a

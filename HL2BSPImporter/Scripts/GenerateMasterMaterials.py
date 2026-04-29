@@ -33,6 +33,8 @@ TEXTURE_PARAMS = (
     "BaseColor2",
     "Normal",
     "Normal2",
+    "NormalAlpha",
+    "Normal2Alpha",
     "Detail",
     "BlendModulate",
     "EmissiveColor",
@@ -159,6 +161,11 @@ def default_texture(kind: str) -> Optional[Any]:
     if kind == "normal":
         return load_asset((
             "/Engine/EngineResources/DefaultNormal.DefaultNormal",
+            "/Engine/EngineResources/DefaultTexture.DefaultTexture",
+        ))
+    if kind == "white":
+        return load_asset((
+            "/Engine/EngineResources/WhiteSquareTexture.WhiteSquareTexture",
             "/Engine/EngineResources/DefaultTexture.DefaultTexture",
         ))
     return load_asset((
@@ -358,7 +365,14 @@ class GraphBuilder:
     def declare_all_parameters(self) -> None:
         y = -1200
         for name in TEXTURE_PARAMS:
-            kind = "normal" if name in ("Normal", "Normal2") else "color"
+            if name in ("Normal", "Normal2"):
+                kind = "normal"
+            elif name in ("NormalAlpha", "Normal2Alpha"):
+                # Sibling alpha-mask textures default to a white mask so an unbound
+                # parameter doesn't accidentally zero the specular / phong response.
+                kind = "white"
+            else:
+                kind = "color"
             self.texture(name, kind, -2400, y)
             y += 120
         self.cube_texture("Cubemap", -2200, y)

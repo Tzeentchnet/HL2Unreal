@@ -71,13 +71,13 @@ All currently dropped. These are large independent features; ordered roughly by 
 3. Light-style data: per-style intensity ramps drive flicker/strobe lights; would require a runtime component.
 4. 3D skybox (`sky_camera` entity + `skybox/` BSP region): scale, transform, and composite the skybox geometry as a separate sub-mesh anchored to the sky_camera origin.
 
-### `FReimportHandler` + Interchange refactor
+### Interchange refactor / partial reimport
 
-Right now re-importing a BSP creates a fresh asset set rather than updating the existing one.
+Phase 12e added the smaller `FReimportHandler` layer: imported worldspawn `UStaticMesh` assets store `UAssetImportData`, and Content Browser right-click → Reimport reruns `UHL2BSPImporterFactory` against the original `.bsp` path. This covers the basic UE editor workflow without changing the factory architecture.
 
 Next steps:
-- Implement `FReimportHandler::CanReimport` / `Reimport` on `UHL2BSPImporterFactory` so right-click → Reimport works on the worldspawn `UStaticMesh` and propagates back to the BSP source.
-- Stretch goal: rewrite the factory as an Interchange `UInterchangeTranslatorBase` + pipeline. The Interchange static-mesh surface is production in 5.7 (see Phase 13 below); this entry tracks the smaller `FReimportHandler`-only step. The full Interchange refactor is consolidated under Phase 13.
+- Rewrite the factory as an Interchange `UInterchangeTranslatorBase` + pipeline. The Interchange static-mesh surface is production in 5.7 (see Phase 13 below), and this is still the right path for source-asset round-trip metadata, asset-registry diffs, async import, and per-import parameter overrides without round-tripping `Config/`.
+- Add partial reimport modes after Interchange lands: geometry only, material/table refresh only, prop mesh refresh only.
 
 ### Phase 13 — Engine 5.7 modernization
 
@@ -91,9 +91,9 @@ Ordered roughly by user-visible impact.
 
 3. **MegaLights pass for `light_*` entities.** Source maps routinely ship 200–1000+ point lights (`light`, `light_spot`, sometimes `light_dynamic`). Pre-5.6 this was a non-starter under VSMs. With MegaLights stable in 5.7 those entities can be spawned as real `APointLight` / `ASpotLight` actors at import-time without tanking perf. Ship as an editor utility (or a new factory pass gated by `bSpawnLightActors`) that walks `_Entities`, maps `_light` colour/intensity to UE units, and writes one actor per entity. Pairs with item 5 (World Partition) so the actor count is OFPA-cheap.
 
-4. **Interchange translator + pipeline refactor (consolidates the `FReimportHandler` open item).** 5.7 is the first release where the Interchange static-mesh surface is suitable for shipping a third-party translator (multi-asset emit, custom payloads, per-pipeline factory parameters, source-asset round-trip, asset-registry diff). Rewrite `UHL2BSPImporterFactory` as `UInterchangeBSPTranslator` + `UInterchangeBSPPipeline`, exposing the existing `UHL2BSPImporterSettings` as pipeline parameters. Wins: Reimport / partial reimport (e.g. just re-bake materials), `Diff` viewer, async import out of the editor's main thread, parameter overrides per-import without round-tripping `Config/`. Keeps the factory shim during transition so existing `.bsp → drag-drop` UX is preserved.
+4. **Interchange translator + pipeline refactor (builds on the basic `FReimportHandler`).** 5.7 is the first release where the Interchange static-mesh surface is suitable for shipping a third-party translator (multi-asset emit, custom payloads, per-pipeline factory parameters, source-asset round-trip, asset-registry diff). Rewrite `UHL2BSPImporterFactory` as `UInterchangeBSPTranslator` + `UInterchangeBSPPipeline`, exposing the existing `UHL2BSPImporterSettings` as pipeline parameters. Wins: partial reimport (e.g. just re-bake materials), `Diff` viewer, async import out of the editor's main thread, parameter overrides per-import without round-tripping `Config/`. Keeps the factory shim during transition so existing `.bsp → drag-drop` UX is preserved.
 
-5. **World Partition + One File Per Actor "import as level" pass.** Currently brush-entity sub-meshes and prop instances ship as DataTable rows; spawning is the user's job. With WP+OFPA in 5.7 we can emit a `UWorld` directly: one OFPA actor per `FHL2Entity` row, auto-assigned to a Data Layer by classname (`prop_*` / `func_*` / `trigger_*` / `light_*` / `logic_*`), `prop_static` instances grouped into ISMs per model. OFPA keeps per-actor edits cheap; WP keeps the editor responsive on large maps. Ship behind `bImportAsLevel` (default off — DataTable path stays the canonical output for users who want full control).
+5. **World Partition + One File Per Actor "import as level" pass.** The lightweight `UHL2LevelSpawnLibrary::SpawnImportedActors` helper can now materialise the generated DataTables into actors in the active editor world. The larger WP+OFPA path would emit a `UWorld` directly: one OFPA actor per `FHL2Entity` row, auto-assigned to a Data Layer by classname (`prop_*` / `func_*` / `trigger_*` / `light_*` / `logic_*`), `prop_static` instances grouped into ISMs per model. OFPA keeps per-actor edits cheap; WP keeps the editor responsive on large maps. Ship behind `bImportAsLevel` (default off — DataTable path stays the canonical output for users who want full control).
 
 6. **HLOD / Nanite-aware HLOD layer auto-config.** When item 5 lands, configure each spawned actor's `HLODLayer` by classname (small props → most aggressive proxy layer; brush sub-meshes → lower layer; lights → no HLOD). WP HLOD generates the merged proxies. No code beyond the layer assignment + a one-shot `BuildHLODs` invocation behind a setting.
 
@@ -114,6 +114,48 @@ Tracking: the items above are independent and can ship in any order. Item 1 (Nan
 ### Big-endian (Xbox 360 / PS3) BSPs
 
 `'PSBV'` magic is currently rejected with a clear error. Scope: byteswap every header / lump-struct field on read. Low priority — community maps are PC-only in practice.
+
+### Standalone .vmt and .vtf factories
+
+Shipped under the Tranche B entry in [CHANGELOG.md](CHANGELOG.md). `UHL2VTFFactory` (UTexture2D / UTextureCube) and `UHL2VMTFactory` (UMaterialInstanceConstant) handle right-click → Import on individual `.vtf` / `.vmt` files in the Content Browser, and underpin the bulk-import toolbar.
+
+The Tranche B follow-up shipped the normal-map alpha sibling: when a `$bumpmap` VTF carries non-uniform alpha, both the BSP-driven material builder and the standalone `.vtf` factory emit a sibling `<key>_a` `UTexture2D` (grayscale mask) and bind it to the master-material `NormalAlpha` / `Normal2Alpha` parameter. No outstanding work tracked under this entry.
+
+### Editor toolbar + bulk-import menu ("BSP Importer")
+
+Shipped under the Tranche B entry in [CHANGELOG.md](CHANGELOG.md). Three actions registered: Bulk Import Textures (.vtf), Bulk Import Materials (.vmt), Import BSP. Tranche B follow-ups added: **Bulk Import Models** (.mdl → `UStaticMesh` via the new `UHL2MDLFactory`) and a custom Half-Life lambda SVG icon on the toolbar combo button (loaded via a per-plugin `FSlateStyleSet`).
+
+Outstanding (this entry stays open until):
+
+- Convert Skyboxes menu entry — currently happens automatically during BSP import via the `bConvertSkyboxes` setting; a standalone toolbar action would let users build cubemaps from a `materials/skybox/` tree without importing a map.
+
+### Sound script + soundscape importers (.wav only)
+
+`scripts/game_sounds_manifest.txt` and `scripts/soundscapes_manifest.txt` both reference nested `.txt` files via `#include` directives, then map sound names → `.wav` paths + attenuation / radius (game sounds) or sound names → `ambient`/`random`/`playlooping`/`playsoundscape` directives (soundscapes).
+
+Scope:
+- `UHL2SoundScriptFactory` and `UHL2SoundScapeFactory` parse the respective manifests via `HL2KV` (Phase A4), follow `#include` directives (this is the consumer that lights up the deferred `#include` resolution path in `HL2KV`), emit one runtime asset per manifest carrying the parsed mapping.
+- Per-`USoundWave` import for the referenced `.wav` payloads under `<SynthesizedAssetRoot>/Sounds/<source path>`, sourced from the per-import pakfile + `SourceContentRoots/sound/`.
+
+Skipped: `UMP3SoundFactory` / MPG123 (third-party dep). UE 5.7 ships an in-engine MP3 decoder via WMF on Windows — could lift to that as a follow-up if HL2 music (`media/*.mp3`) becomes a target. Also skipped: `ambient_generic` / `env_soundscape` actor materialisation — leave that to user Blueprint over the imported DataTable until the runtime gameplay scope (currently excluded) revisits.
+
+Sizing: M (~400 LOC of script parsers + ~300 LOC of runtime asset class). Blocked on Phase A4 (already shipped).
+
+### Animated MDL importer (USkeletalMesh + UAnimSequence + UPhysicsAsset)
+
+Phase 12 shipped `prop_static` static-mesh synthesis. Animated `prop_dynamic`, `prop_physics`, and `prop_ragdoll` need skeletal synthesis: `USkeletalMesh` + `USkeleton` + per-sequence `UAnimSequence` + per-bone `UPhysicsAsset`. Phase 13 item 8 (Nanite Skeletal Meshes) is the consumer that makes the scope worthwhile.
+
+Scope (lifts AlleyKatPr0's `MDLFactory.cpp` ~2200 LOC reference implementation, ported to use our `HL2MdlReader`/`HL2VvdReader`/`HL2VtxReader` instead of the bundled `studiomdl/` namespace, and our `HL2KV` parser instead of `UValveDocument`):
+- Bone hierarchy → `FReferenceSkeleton` (with multi-root synthesis: inject `"root"` bone, auto-rename colliding source bones to `"actual_root"`).
+- Per-LOD `FSkeletalMeshImportData` build, bone weights from `mstudiovertex_t::m_BoneWeights`, MikkTSpace tangent path, calls `IMeshBuilderModule::BuildSkeletalMesh`.
+- `mstudioseqdesc_t` + `mstudioanimdesc_t` walk handling section-banded compressed anims and `animblock != 0` indirection through external `.ani` files. Compressed-rotation/position pipeline (`ANIMROT`/`ANIMPOS` RLE-decoded via `ReadAnimValues`/`DecompressAnimValues` per axis, scaled by `bone->rotscale[axis]` / `bone->posscale[axis]`, optionally additive via `ANIMDELTA` flag), `RAWROT` (`Quat48`), `RAWROT2` (`Quat64`), `RAWPOS` (`Vector3f`), root-bone yaw fix-up (`angles.Z += DegreesToRadians(-90.0f)`). Source Tait-Euler ↔ quaternion via `SourceAnglesToQuat` / `QuatToSourceAngles` (canonical reference: marc-b-reynolds.github.io blog).
+- `.phy` solid parse (compact + legacy surface header variants), KV1 text-section parse for `solid { index, name, surfaceprop }` → `USkeletalBodySetup` per bone (with `PhysMaterial = USurfaceProp` from Phase A3), `ragdollconstraint { parent, child, xmin/xmax/xfric, ymin/..., zmin/... }` → `UPhysicsConstraintTemplate`, `collisionrules { collisionpair "i,j" ... }` → `physicsAsset->EnableCollision(i, j)`.
+- `mstudioattachment_t` 4×3 matrices → `USkeletalMeshSocket` with bone-relative Location/Rotation/Scale.
+- `mstudiomodelgroup_t` `.mdl` includes for shared-skeleton animation packs.
+
+Net-new readers required: `HL2PhyReader` (physics file), `HL2AniReader` (external animation banks). `HL2MdlReader` extension to expose seq/anim/bone-hierarchy that the current reader walks past.
+
+Sizing: L (~2200 LOC port + ~600 LOC of net-new reader code). Blocked on Phase A3 + Phase A4 (both already shipped). Re-evaluate against Phase 13 item 8 (Nanite Skeletal Meshes) before scheduling.
 
 ---
 
@@ -136,5 +178,5 @@ Phase 10 captures `On*` outputs as `FHL2EntityIO` rows. Non-`On*` duplicate keyv
 ## Deferred
 
 - **Material parameter coverage beyond Phase 11b**: per-leaf cubemap baking from `LUMP_CUBEMAPS` (decision pending Phase 11c), water/refract shaders (decision pending Phase 11c — likely UE5 Water plugin remap), material proxies as runtime-dynamic parameters (would require a runtime component).
-- **Brush-entity actor placement**: Phase 8b emits the per-brush-model `UStaticMesh` assets and links them via `FHL2Entity::BrushMesh`. Auto-spawning `AStaticMeshActor`s into a Level from the entity table is left to a Blueprint / editor utility — no factory-level "import as level" pass is planned until the static-prop mesh importer lands (so a single import can populate the whole level at once).
-- **Sound / audio support**: nothing in the importer currently touches Source's audio pipeline. A future `HL2SoundBuilder` pass would need to (1) extract `.wav` / `.mp3` payloads from the per-import pakfile and `SourceContentRoots/sound/` trees, (2) import them as `USoundWave` assets under `<SynthesizedAssetRoot>/Sounds/<source path>`, (3) parse `scripts/soundscapes_*.txt` into reusable sound cue / `USoundscape`-equivalent assets, and (4) materialise audio entities (`ambient_generic`, `env_soundscape`, `env_soundscape_proxy`, `env_soundscape_triggerable`) — currently retained only as raw `FHL2Entity` keyvalues — into `AAmbientSound` actors with the resolved `USoundBase` reference and Source's attenuation / radius / spawnflag mapping. Deferred until a target map demands it; opens behind a `bImportSounds` setting and a `ParentSoundAttenuation` slot mirroring the material-parent contract.
+- **Full import-as-level workflow**: `UHL2LevelSpawnLibrary::SpawnImportedActors` can place brush meshes, entity prop meshes, static props, and basic light placeholders from the generated DataTables into the active editor world. A factory-level or Interchange-driven `UWorld` emission path with World Partition, OFPA, Data Layers, calibrated lights, HLOD assignment, and runtime Source I/O remains deferred.
+- **Sound / audio support**: nothing in the importer currently touches Source's audio pipeline beyond preserving raw audio-entity keyvalues on `FHL2Entity`. A future `HL2SoundBuilder` pass would need to (1) extract `.wav` / `.mp3` payloads from the per-import pakfile and `SourceContentRoots/sound/` trees, (2) import them as `USoundWave` assets under `<SynthesizedAssetRoot>/Sounds/<source path>`, (3) parse `scripts/soundscapes_*.txt` into reusable sound cue / `USoundscape`-equivalent assets, and (4) materialise audio entities (`ambient_generic`, `env_soundscape`, `env_soundscape_proxy`, `env_soundscape_triggerable`) into `AAmbientSound` actors with the resolved `USoundBase` reference and Source's attenuation / radius / spawnflag mapping. Deferred until a target map demands it; opens behind a `bImportSounds` setting and a `ParentSoundAttenuation` slot mirroring the material-parent contract.
